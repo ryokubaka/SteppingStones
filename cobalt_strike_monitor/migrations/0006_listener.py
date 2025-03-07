@@ -18,6 +18,7 @@ class Migration(migrations.Migration):
                 ('proxy', models.CharField(max_length=100)),
                 ('payload', models.CharField(max_length=100)),
                 ('port', models.CharField(max_length=100)),
+                ('localonly', models.CharField(max_length=100)),
                 ('profile', models.CharField(max_length=100)),
                 ('host', models.CharField(max_length=100)),
                 ('althost', models.CharField(max_length=100)),

@@ -28,3 +28,5 @@ django-plugins-bihealth==0.5.2
 yara-x==0.13.0
 django-import-export==4.3.5
 chevron-blue==0.2.1
+django-allow-cidr==0.5.0
+django-environ==0.12.0

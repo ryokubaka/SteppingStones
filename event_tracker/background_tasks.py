@@ -45,24 +45,25 @@ def sync_pwnedpasswords():
         return
 
     start = time.time()
-    print("Starting sync of haveibeenpwned hashes")
+    print("We don't do no stinking haveibeenpwned checking")
+    # print("Starting sync of haveibeenpwned hashes")
 
-    db_hash_count = 0
-    for db_hash in query.all():
-        db_hash_count += 1
-        response = requests.get(f'https://api.pwnedpasswords.com/range/{db_hash["prefix"]}?mode=ntlm')
-        if response.ok:
-            count = 0
-            for line in response.text.split("\n"):
-                if line.startswith(db_hash["suffix"]):
-                    suffix, count = line.strip().split(":", 1)
-                    break
-            Credential.objects.filter(hash_type=HashCatMode.NTLM, hash=db_hash["hash"]).update(haveibeenpwned_count=count)
-            print(f"Hash {db_hash['hash']} {'not ' if count == 0 else ''}found at pwnedpasswords.com")
-        else:
-            print(f"Error {response.status_code} from pwnedpasswords.com: {response.text}")
+    # db_hash_count = 0
+    # for db_hash in query.all():
+    #     db_hash_count += 1
+    #     response = requests.get(f'https://api.pwnedpasswords.com/range/{db_hash["prefix"]}?mode=ntlm')
+    #     if response.ok:
+    #         count = 0
+    #         for line in response.text.split("\n"):
+    #             if line.startswith(db_hash["suffix"]):
+    #                 suffix, count = line.strip().split(":", 1)
+    #                 break
+    #         Credential.objects.filter(hash_type=HashCatMode.NTLM, hash=db_hash["hash"]).update(haveibeenpwned_count=count)
+    #         print(f"Hash {db_hash['hash']} {'not ' if count == 0 else ''}found at pwnedpasswords.com")
+    #     else:
+    #         print(f"Error {response.status_code} from pwnedpasswords.com: {response.text}")
 
-    print(f"Done sync of {db_hash_count:,} haveibeenpwned hashes in {time.time() - start:.2f} seconds")
+    # print(f"Done sync of {db_hash_count:,} haveibeenpwned hashes in {time.time() - start:.2f} seconds")
 
 
 @background(schedule=5)

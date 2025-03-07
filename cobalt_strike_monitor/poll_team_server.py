@@ -104,14 +104,28 @@ on ready {
             if "Could not find or load main class aggressor.headless.Start" in aggressor_output:
                 aggressor_output += "\nTry (re-)running Cobalt Strike's update script"
     try:
-        p = subprocess.Popen(["systemctl",
-                              "status",
-                              "ssbot"],
+        # Check if 'process_tasks' is running
+        p = subprocess.Popen(["pgrep", "-f", "manage.py process_tasks"],
                              stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-        ssbot_status = p.stdout.read().decode("unicode_escape")
-    except FileNotFoundError as e:
-        ssbot_status = None
+                             stderr=subprocess.PIPE)
+        output, _ = p.communicate()        
+        if output.strip():
+            ssbot_status = "SSBot is running (via container)"
+        else:
+            ssbot_status = None
+    except Exception as e:
+        print(f"Error checking ssbot status: {e}")
+        return False
+
+    # try:
+    #     p = subprocess.Popen(["systemctl",
+    #                           "status",
+    #                           "ssbot"],
+    #                          stdout=subprocess.PIPE,
+    #                          stderr=subprocess.STDOUT)
+    #     ssbot_status = p.stdout.read().decode("unicode_escape")
+    # except FileNotFoundError as e:
+    #     ssbot_status = None
 
     found_jvm = False
     for p in psutil.process_iter(["cmdline"]):

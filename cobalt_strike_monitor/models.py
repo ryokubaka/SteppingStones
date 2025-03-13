@@ -21,7 +21,6 @@ class Listener(models.Model):
     name = models.CharField(max_length=100, primary_key=True)
     proxy = models.CharField(max_length=100)
     payload = models.CharField(max_length=100)
-    localonly = models.CharField(max_length=100)
     port = models.CharField(max_length=100)
     profile = models.CharField(max_length=100)
     host = models.CharField(max_length=100)

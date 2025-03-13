@@ -103,29 +103,35 @@ on ready {
 
             if "Could not find or load main class aggressor.headless.Start" in aggressor_output:
                 aggressor_output += "\nTry (re-)running Cobalt Strike's update script"
-    try:
-        # Check if 'process_tasks' is running
-        p = subprocess.Popen(["pgrep", "-f", "manage.py process_tasks"],
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
-        output, _ = p.communicate()        
-        if output.strip():
-            ssbot_status = "SSBot is running (via container)"
-        else:
+    
+    in_container = os.path.exists("/.dockerenv")
+    if not in_container:
+        try:
+            p = subprocess.Popen(
+                ["systemctl", "status", "ssbot"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT
+            )
+            ssbot_status = p.stdout.read().decode("unicode_escape")
+        except FileNotFoundError:
             ssbot_status = None
-    except Exception as e:
-        print(f"Error checking ssbot status: {e}")
-        return False
+    else:
+        try:
+            # Check if 'process_tasks' is running
+            p = subprocess.Popen(
+                ["pgrep", "-f", "manage.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            output, _ = p.communicate()
 
-    # try:
-    #     p = subprocess.Popen(["systemctl",
-    #                           "status",
-    #                           "ssbot"],
-    #                          stdout=subprocess.PIPE,
-    #                          stderr=subprocess.STDOUT)
-    #     ssbot_status = p.stdout.read().decode("unicode_escape")
-    # except FileNotFoundError as e:
-    #     ssbot_status = None
+            if output.strip():
+                ssbot_status = "Confirm that process_tasks is active (running) via Container"
+            else:
+                ssbot_status = None
+        except Exception as e:
+            print(f"Error checking ssbot status: {e}")
+            return False
 
     found_jvm = False
     for p in psutil.process_iter(["cmdline"]):
@@ -330,22 +336,20 @@ def parse(p, server):
                     beacon_log.type = clean_type(line_data[0])
                     beacon_log.beacon = get_beacon_for_bid(line_data[1], server)
 
-                    # Work back from the end of line_data, as there may (or may not) be an operator element in the
-                    # middle which messes up later offsets
-                    beacon_log.when = datetime.fromtimestamp(int(line_data[-1]) / 1000, tz=UTC)
-
-                    # Our regexes rely on a \n to find ends of passwords etc, so ensure there's always 1
-                    beacon_log.data = line_data[-2].rstrip("\n") + "\n"
-
-                    # Trim prefix added by NCC custom tooling
-                    if beacon_log.data.startswith("received output:"):
-                        beacon_log.data = beacon_log.data[17:]
-
-                    if beacon_log_to_merge:  # If this was set by a previous line
-                        beacon_log.data = beacon_log_to_merge.data + beacon_log.data
-
-                    if len(line_data) > 4:
-                        beacon_log.operator = line_data[-3]
+                    if line_data[-1] and re.match(r"^\d+$", line_data[-1]) and line_data[-1] != "0":
+                        # The last element is the timestamp
+                        beacon_log.when = datetime.fromtimestamp(int(line_data[-1]) / 1000, tz=UTC)
+                        beacon_log.data = line_data[-2].rstrip("\n") + "\n"
+                        # If there's enough elements for an operator
+                        if len(line_data) > 4:
+                            beacon_log.operator = line_data[-3]
+                    else:
+                        # The last element is empty string or null -> second-last is the timestamp
+                        beacon_log.when = datetime.fromtimestamp(int(line_data[-2]) / 1000, tz=UTC)
+                        beacon_log.data = line_data[-3].rstrip("\n") + "\n"
+                        # If there's enough elements for an operator
+                        if len(line_data) > 5:
+                            beacon_log.operator = line_data[-4]
 
                     beacon_log.team_server = server
 
@@ -360,9 +364,16 @@ def parse(p, server):
 
                             if clean_type(next_line_data[0]) == "output" and line_data[1] == next_line_data[1]:
                                 # Both this line and the next are confirmed to be "output" for the same beacon
-                                if int(next_line_data[-1]) - int(line_data[-1]) < 5:
-                                    # The two lines are within 5ms of each other
-                                    beacon_log_to_merge = beacon_log
+                                if next_line_data[-1] and re.match(r"^\d+$", next_line_data[-1]) and next_line_data[-1] != "0":
+                                    # Last index is NOT empty or null, meaning it has timestamp in it
+                                    if int(next_line_data[-1]) - int(line_data[-1]) < 5:
+                                        # The two lines are within 5ms of each other
+                                        beacon_log_to_merge = beacon_log
+                                else:
+                                # Last index is empty or null, likely beacon_output, so second to last index has timestamp
+                                    if int(next_line_data[-2]) - int(line_data[-2]) < 5:
+                                        # The two lines are within 5ms of each other
+                                        beacon_log_to_merge = beacon_log                                    
 
                     if beacon_log_to_merge is None:
                         # We're not preserving this beacon_log object for the next iteration, so write it to the DB
@@ -427,4 +438,4 @@ def clear_local_copy(team_server):
 
 
 def clean_type(input_string):
-    return input_string.removeprefix("beacon_").removesuffix("ed").removesuffix("_alt")
+    return input_string.removeprefix("beacon_").removesuffix("ed").removesuffix("_alt").removesuffix("_ls")

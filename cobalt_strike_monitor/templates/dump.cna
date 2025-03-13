@@ -27,11 +27,16 @@ sub archive_filter
 }
 
 $last_beaconlog = {{last_beaconlog_timestamp}};
+
 sub beaconlog_filter
 {
-    if (strlen($1[-1]) > 0)
+    if ($1[-1] != $null)
     {
         return iff(parseNumber($1[-1]) > $last_beaconlog, $1, $null);
+    }
+    else if ($1[-2] != $null)
+    {
+        return iff(parseNumber($1[-2]) > $last_beaconlog, $1, $null);
     }
     else
     {
@@ -81,7 +86,15 @@ on beacons {
    if ($last_session_obj) { $last_session = parseNumber($last_session_obj["opened"]); }
 
    $last_beaconlog_obj = dumpmodelarrayofarrays("[B]", data_query("beaconlog"), &beaconlog_filter);
-   if ($last_beaconlog_obj) { $last_beaconlog = parseNumber($last_beaconlog_obj[-1]); }
+   if ($last_beaconlog_obj) {
+    if ($last_beaconlog_obj[-1] == "") {
+        $last_beaconlog = parseNumber($last_beaconlog_obj[-2]);
+    } else {
+        $last_beaconlog = parseNumber($last_beaconlog_obj[-1]);
+    }
+   }
+   
+   # if ($last_beaconlog_obj) { $last_beaconlog = parseNumber($last_beaconlog_obj[-1]); }
 
    # Deal with metadata after any new beacon sessions have been created, but before our "last" figure is too far off.
    # Our processing of checkins needs sleep data from beacon logs so needs to come after that too

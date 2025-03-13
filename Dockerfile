@@ -1,14 +1,12 @@
 FROM python:3.13-bullseye
 
 # Arguments for environment variables
-ARG DATABASE_URL
 ARG DJANGO_DEBUG
 ARG DJANGO_SECRET_KEY
 ARG DJANGO_ALLOWED_HOSTS
 ARG DJANGO_ALLOWED_CIDR_NETS
 
 # Set environment variables from args
-ENV DATABASE_URL=${DATABASE_URL}
 ENV DJANGO_DEBUG=${DJANGO_DEBUG}
 ENV DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
 ENV DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS}
@@ -23,10 +21,6 @@ COPY . /opt/steppingstones/
 # Create and activate virtual environment
 RUN python3.13 -m venv .venv && \
     . .venv/bin/activate
-    #  && \
-    # pip install --no-cache-dir --upgrade pip && \
-    # pip install --no-cache-dir -r requirements.txt && \
-    # pip install --no-cache-dir gunicorn
 
 # Install system dependencies including Java (openjdk-17-jre)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -51,9 +45,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Best practices for Python
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
-
-# (Optional) If you have a separate production settings file, set it here
-# ENV DJANGO_SETTINGS_MODULE steppingstones.settings.production
 
 # Expose port 8000 for Gunicorn
 EXPOSE 8000

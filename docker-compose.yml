@@ -3,16 +3,16 @@ version: '3.8'
 services:
   web:
     build: .
-    container_name: stepping_stones
+    image: stepping_stones
+    container_name: stepping_stones_web
     ports:
       - "8000:8000"
     volumes:
       - ./:/opt/steppingstones
-      - ./sqlite_data:/opt/steppingstones/sqlite_data
       - /opt/cobaltstrike:/opt/cobaltstrike
     restart: always
     environment:
-      DJANGO_DEBUG: "True"  # dev mode
+      DJANGO_DEBUG: "FALSE"
       DJANGO_SECRET_KEY: "dev-secret-key"
       DJANGO_ALLOWED_HOSTS: "*"
     command: >
@@ -25,84 +25,23 @@ services:
         python manage.py runserver 0.0.0.0:8000 --insecure
       "
 
-  #Tasks container only runs process_tasks. Optionally waits for DB first.
+  #Tasks container only runs process_tasks
   tasks:
-    build: .
+    image: stepping_stones
     container_name: stepping_stones_tasks
     volumes:
       - ./:/opt/steppingstones
-      - ./sqlite_data:/opt/steppingstones/sqlite_data
       - /opt/cobaltstrike:/opt/cobaltstrike
     depends_on:
       - web
-    # environment:
-    #   DJANGO_DEBUG: "True"
-    #   DJANGO_SECRET_KEY: "dev-secret-key"
-    #   DJANGO_ALLOWED_HOSTS: "*"
     restart: unless-stopped
-    command: "python manage.py process_tasks"
+    command: >
+      sh -c "
+        # Delete the cobaltstrike poller tasks so they are regenerated upon starting based on active teamservers
+        python manage.py shell -c \"from background_task.models import Task; Task.objects.filter(task_name='cobalt_strike_monitor.poll_team_server.poll_teamserver').delete()\" &&
+        # Start the process task
+        python manage.py process_tasks"
 
 volumes:
   sqlite_data:
     driver: local
-
-
-# version: '3.8'
-
-# services:
-#   db:
-#     image: postgres:15
-#     container_name: steppingstones-db
-#     volumes:
-#       - db_data:/var/lib/postgresql/data/
-#     environment:
-#       POSTGRES_DB: steppingstones
-#       POSTGRES_USER: steppingstonesuser
-#       POSTGRES_PASSWORD: supersecretpassword
-#     restart: always
-
-#   # Web container that applies migrations once, then starts runserver
-#   web:
-#     build: .
-#     container_name: steppingstones-web
-#     depends_on:
-#       - db
-#     environment:
-#       DATABASE_URL: "postgres://steppingstonesuser:supersecretpassword@db:5432/steppingstones"
-#       DJANGO_DEBUG: "True"  # dev mode
-#       DJANGO_SECRET_KEY: "dev-secret-key"
-#       DJANGO_ALLOWED_HOSTS: "*"
-#     ports:
-#       - "8000:8000"
-#     restart: unless-stopped
-#     command: >
-#       sh -c "
-#         # Ensure background_task migrations exist
-#         python manage.py makemigrations background_task &&
-#         # Apply migrations so the DB is fully ready
-#         python manage.py migrate &&
-#         # Then launch the dev server
-#         python manage.py runserver 0.0.0.0:8000 &&
-#         python manage.py process_tasks
-#       "
-
-#   # Tasks container only runs process_tasks. Optionally waits for DB first.
-#   # tasks:
-#   #   build: .
-#   #   container_name: steppingstones-tasks
-#   #   depends_on:
-#   #     - db
-#   #   environment:
-#   #     DATABASE_URL: "postgres://steppingstonesuser:supersecretpassword@db:5432/steppingstones"
-#   #     DJANGO_DEBUG: "True"
-#   #     DJANGO_SECRET_KEY: "dev-secret-key"
-#   #     DJANGO_ALLOWED_HOSTS: "*"
-#   #   restart: unless-stopped
-#   #   command: >
-#   #     sh -c "
-#   #       ./wait-for-db.sh db 5432 &&
-#   #       python manage.py process_tasks
-#   #     "
-
-# volumes:
-#   db_data:

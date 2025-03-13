@@ -40,7 +40,7 @@ from reversion.views import RevisionMixin
 from taggit.forms import TagField
 from taggit.models import Tag
 
-from cobalt_strike_monitor.models import TeamServer, Archive, Beacon, BeaconExclusion, BeaconPresence, \
+from cobalt_strike_monitor.models import TeamServer, Archive, Beacon, BeaconLog, BeaconExclusion, BeaconPresence, \
     Download
 from cobalt_strike_monitor.poll_team_server import healthcheck_teamserver
 from .models import Task, Event, AttackTactic, AttackTechnique, Context, AttackSubTechnique, FileDistribution, File, \

@@ -267,11 +267,11 @@ class Archive(models.Model):
 
     @property
     def associated_beaconlog_output(self):
-        next_output_generator = BeaconLog.objects.filter(Q(type="input") | Q(type="task")) \
+        next_output_generator = Archive.objects.filter(Q(type="input") | Q(type="task")) \
                                  .filter(when__gt=timedelta(seconds=1) + self.when, beacon=self.beacon) \
                                  .order_by("when")
 
-        outputs_between = BeaconLog.objects.filter(Q(type="output") | Q(type="error")) \
+        outputs_between = Archive.objects.filter(Q(type="output") | Q(type="error")) \
                 .filter(id__gte=self.id, beacon=self.beacon)
 
         if next_output_generator.exists():

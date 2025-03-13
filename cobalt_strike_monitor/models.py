@@ -42,10 +42,6 @@ class Listener(models.Model):
     def listener_type(self):
         if self.payload == "windows/beacon_bind_pipe":
             return "SMB"
-        elif self.payload == "windows/beacon_bind_tcp":
-            return "TCP"
-        elif self.payload == "windows/beacon_http/reverse_http":
-            return "HTTP"
         elif self.payload == "windows/beacon_https/reverse_https":
             return "HTTPS"
         elif self.payload == "windows/beacon_http/reverse_http":
@@ -239,7 +235,7 @@ class Archive(models.Model):
     beacon = models.ForeignKey(Beacon, on_delete=models.CASCADE, null=True) # May be null for "webhit" events
 
     type = models.CharField(max_length=20)  # One of: initial, input, task, checkin, output, indicator
-    data = models.CharField(max_length=1000)  # The content of the log
+    data = models.CharField(max_length=100)  # The content of the log
     tactic = models.CharField(max_length=100, null=True)  # One or more (comma seperated) MITRE tactics
 
     event_mappings = GenericRelation("event_tracker.EventMapping", related_query_name='beacon')
@@ -273,7 +269,7 @@ class Archive(models.Model):
     @property
     def associated_beaconlog_output(self):
         next_output_generator = BeaconLog.objects.filter(Q(type="input") | Q(type="task")) \
-                                 .filter(when__gt=timedelta(seconds=60) + self.when, beacon=self.beacon) \
+                                 .filter(when__gt=timedelta(seconds=1) + self.when, beacon=self.beacon) \
                                  .order_by("when")
 
         outputs_between = BeaconLog.objects.filter(Q(type="output") | Q(type="error")) \

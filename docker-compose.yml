@@ -4,7 +4,7 @@ services:
   web:
     build: .
     image: stepping_stones
-    container_name: stepping_stones_web
+    container_name: web
     ports:
       - "8000:8000"
     volumes:
@@ -28,19 +28,23 @@ services:
   #Tasks container only runs process_tasks
   tasks:
     image: stepping_stones
-    container_name: stepping_stones_tasks
+    container_name: tasks
     volumes:
       - ./:/opt/steppingstones
       - /opt/cobaltstrike:/opt/cobaltstrike
     depends_on:
       - web
     restart: unless-stopped
-    command: >
+    command: |
       sh -c "
         # Delete the cobaltstrike poller tasks so they are regenerated upon starting based on active teamservers
-        python manage.py shell -c \"from background_task.models import Task; Task.objects.filter(task_name='cobalt_strike_monitor.poll_team_server.poll_teamserver').delete()\" &&
-        # Start the process task
-        python manage.py process_tasks"
+        if [ -f db.sqlite3 ]; then
+            python manage.py shell -c \"from background_task.models import Task; Task.objects.filter(task_name='cobalt_strike_monitor.poll_team_server.poll_teamserver').delete()\"
+        else
+            echo \"db.sqlite3 does not exist; skipping poll_teamserver tasks removal.\"
+        fi
+        python manage.py process_tasks
+      "
 
 volumes:
   sqlite_data:

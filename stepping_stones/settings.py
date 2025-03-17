@@ -12,6 +12,12 @@ https://docs.djangoproject.com/en/3.2/ref/settings/
 
 from pathlib import Path
 import matplotlib
+import environ
+import os
+import json
+
+env = environ.Env()
+environ.Env.read_env()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,10 +27,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-3lzrlzp12i&!y4-ymzk8z3mwvcr1&=jf5nplr+q_&@kr*tnt!*'
+#SECRET_KEY = 'django-insecure-3lzrlzp12i&!y4-ymzk8z3mwvcr1&=jf5nplr+q_&@kr*tnt!*'
+SECRET_KEY = env('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+#DEBUG = True
+DEBUG = env('DJANGO_DEBUG', default=False, cast=bool)
 
 # Application definition
 
@@ -67,6 +75,7 @@ MIDDLEWARE = [
     'event_tracker.middleware.InitialConfigMiddleware',
     'csp.middleware.CSPMiddleware',
     'django_permissions_policy.PermissionsPolicyMiddleware',
+    'allow_cidr.middleware.AllowCIDRMiddleware',
 ]
 
 ROOT_URLCONF = 'stepping_stones.urls'
@@ -142,7 +151,7 @@ USE_L10N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
+# Static files (CSS, Script, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
 
 STATIC_URL = '/static/'
@@ -155,7 +164,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CSRF_TRUSTED_ORIGINS = ['https://*.example.net','http://127.0.0.1']
 
 USE_X_FORWARDED_HOST = True
-ALLOWED_HOSTS = ['.localhost', '127.0.0.1', '[::1]', '.example.net']
+#ALLOWED_HOSTS = ['.localhost', '127.0.0.1', '[::1]', '.example.net']
+ALLOWED_HOSTS = [env('DJANGO_ALLOWED_HOSTS')]
+#ALLOWED_CIDR_NETS = [env('DJANGO_ALLOWED_CIDR_NETS')]
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 BACKGROUND_TASK_RUN_ASYNC = True

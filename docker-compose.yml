@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    image: stepping_stones
+    container_name: web
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/opt/steppingstones
+      - /opt/cobaltstrike:/opt/cobaltstrike
+    restart: always
+    environment:
+      DJANGO_DEBUG: "FALSE"
+      DJANGO_SECRET_KEY: "dev-secret-key"
+      DJANGO_ALLOWED_HOSTS: "*"
+    command: >
+      sh -c "
+        # Ensure background_task migrations exist
+        python manage.py makemigrations background_task &&
+        # Apply migrations so the DB is fully ready
+        python manage.py migrate &&
+        # Then launch the dev server
+        python manage.py runserver 0.0.0.0:8000 --insecure
+      "
+
+  #Tasks container only runs process_tasks
+  tasks:
+    image: stepping_stones
+    container_name: tasks
+    volumes:
+      - ./:/opt/steppingstones
+      - /opt/cobaltstrike:/opt/cobaltstrike
+    depends_on:
+      - web
+    restart: unless-stopped
+    command: |
+      sh -c "
+        # Delete the cobaltstrike poller tasks so they are regenerated upon starting based on active teamservers
+        if [ -f db.sqlite3 ]; then
+            python manage.py shell -c \"from background_task.models import Task; Task.objects.filter(task_name='cobalt_strike_monitor.poll_team_server.poll_teamserver').delete()\"
+        else
+            echo \"db.sqlite3 does not exist; skipping poll_teamserver tasks removal.\"
+        fi
+        python manage.py process_tasks
+      "
+
+volumes:
+  sqlite_data:
+    driver: local

@@ -27,6 +27,7 @@ sub archive_filter
 }
 
 $last_beaconlog = {{last_beaconlog_timestamp}};
+
 sub beaconlog_filter
 {
     return iff($1["when"] > $last_beaconlog, $1, $null);

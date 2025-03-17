@@ -103,15 +103,35 @@ on ready {
 
             if "Could not find or load main class aggressor.headless.Start" in aggressor_output:
                 aggressor_output += "\nTry (re-)running Cobalt Strike's update script"
-    try:
-        p = subprocess.Popen(["systemctl",
-                              "status",
-                              "ssbot"],
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-        ssbot_status = p.stdout.read().decode("unicode_escape")
-    except FileNotFoundError as e:
-        ssbot_status = None
+    
+    in_container = os.path.exists("/.dockerenv")
+    if not in_container:
+        try:
+            p = subprocess.Popen(
+                ["systemctl", "status", "ssbot"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT
+            )
+            ssbot_status = p.stdout.read().decode("unicode_escape")
+        except FileNotFoundError:
+            ssbot_status = None
+    else:
+        try:
+            # Check if 'process_tasks' is running
+            p = subprocess.Popen(
+                ["pgrep", "-f", "manage.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            output, _ = p.communicate()
+
+            if output.strip():
+                ssbot_status = "Confirm that process_tasks is active (running) via Container"
+            else:
+                ssbot_status = None
+        except Exception as e:
+            print(f"Error checking ssbot status: {e}")
+            return False
 
     found_jvm = False
     for p in psutil.process_iter(["cmdline"]):
@@ -373,6 +393,15 @@ def parse(p, server):
                         else:
                             # There's no pending beacon log, just save this non-output log straight to the DB
                             beacon_log.save()
+                        # We need to ensure outputs are saved to the archive table as well; data_query('archives') doesn't return most output
+                            if clean_type(line_data[0]) == "output":
+                                archive_entry = Archive()
+                                archive_entry.data = beacon_log.data  # Copying output data
+                                archive_entry.type = beacon_log.type  # Using the same type
+                                archive_entry.when = beacon_log.when  # Using the same timestamp
+                                archive_entry.beacon = beacon_log.beacon  # Linking to the same beacon
+                                archive_entry.team_server = beacon_log.team_server  # Linking to the same team server
+                                archive_entry.save()
                 elif line.startswith("[C]"):  # Credentials
                     credential = Credential(**dict(filter(
                         lambda elem: elem[0] in ["user", "password", "host", "realm", "source"],

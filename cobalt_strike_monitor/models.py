@@ -301,7 +301,6 @@ class Archive(models.Model):
         else:
             return None
 
-
 class BeaconLog(models.Model):
     team_server = models.ForeignKey(TeamServer, on_delete=models.CASCADE)
     id = models.IntegerField(primary_key=True)  # ID used internally by a Team Server to refer to this archive entry

@@ -36,6 +36,8 @@ extractor_classes = [SnafflerExtractor, BrowserExtractor, NetNTLMv1Extractor, Ne
 
 @transaction.atomic
 def extract_and_save(input_text: str, default_system: str) -> tuple[int, int]:
+    # Returns number individually saved, and number saved in the separate bulk save
+
     credentials_to_add, credentials_to_delete = extract(input_text, default_system)
     saved_secrets = 0
 
@@ -68,6 +70,10 @@ def extract(input_text: str, default_system: str) -> ([Credential], [Credential]
     credentials_to_remove = []
     functions = [subclass().extract for subclass in extractor_classes]
     futures = []
+
+    # Clean up input text - standardise on *nix line endings and remove null bytes
+    input_text = input_text.replace('\r\n', '\n')
+
     for function in functions:
         futures.append(executor.submit(function, input_text, default_system))
     for future in concurrent.futures.as_completed(futures):

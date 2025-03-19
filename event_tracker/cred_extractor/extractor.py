@@ -19,7 +19,6 @@ from event_tracker.cred_extractor.rubeus_extractor import RubeusU2UExtractor, Ru
     RubeusASREPRoastExtractor
 from event_tracker.cred_extractor.seatbelt_extractor import CredEnumExtractor
 from event_tracker.cred_extractor.secretsdump_extractor import SecretsDumpDCSyncExtractor
-from event_tracker.cred_extractor.sharpdpapi_extractor import SharpDPAPINAAExtractor
 from event_tracker.cred_extractor.sharpsccm_extractor import SharpSCCMNAAExtractor
 from event_tracker.cred_extractor.snaffler_extractor import SnafflerExtractor
 from event_tracker.cred_extractor.sprayad_extractor import SprayADExtractor
@@ -32,7 +31,7 @@ extractor_classes = [SnafflerExtractor, BrowserExtractor, NetNTLMv1Extractor, Ne
                      OutflankKerberoastExtractor, RubeusU2UExtractor, RubeusKerberoastExtractor,
                      RubeusASREPRoastExtractor,
                      PlainKerberoastExtractor, PlainASREPRoastExtractor, SecretsDumpDCSyncExtractor,
-                     SharpSCCMNAAExtractor, CertipyHashExtractor, LDAPShellLAPSExtractor, SharpDPAPINAAExtractor]
+                     SharpSCCMNAAExtractor, CertipyHashExtractor, LDAPShellLAPSExtractor]
 
 
 @transaction.atomic

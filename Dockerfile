@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Expose port 8000 for Gunicorn
+# Expose port 8123 for Gunicorn
 EXPOSE 8000
 
 # Default command - run Gunicorn on 0.0.0.0:8000

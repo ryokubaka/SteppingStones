@@ -6,7 +6,7 @@ services:
     image: stepping_stones
     container_name: web
     ports:
-      - "8000:8000"
+      - "8123:8000"
     volumes:
       - ./:/opt/steppingstones
       - /opt/cobaltstrike:/opt/cobaltstrike

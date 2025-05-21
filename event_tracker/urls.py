@@ -113,6 +113,7 @@ urlpatterns = [
     path('bloodhound-server/toggle-high-value/<str:dn>',
          event_tracker.views_bloodhound.toggle_bloodhound_node_highvalue, name='bloodhound-node-toggle-highvalue'),
     path('bloodhound-server/ou-api', event_tracker.views_bloodhound.BloodhoundServerOUAPI.as_view(), name='bloodhound-ou-api'),
+    path('bloodhound-server/ou-search', event_tracker.views_bloodhound.BloodhoundServerOUSearchAPI.as_view(), name='bloodhound-ou-search'),
 
     path('host-list-autocomplete/', HostListAutocomplete.as_view(), name='host-list-autocomplete'),
     path('user-list-autocomplete/', UserListAutocomplete.as_view(), name='user-list-autocomplete'),
@@ -123,4 +124,15 @@ urlpatterns = [
     path('initial-config/task', InitialConfigTask.as_view(), name='initial-config-task'),
     path('initial-config/admin', InitialConfigAdmin.as_view(), name='initial-config-admin'),
     path('user-config/preferences', UserPreferencesView.as_view(), name='user-preferences'),
+
+    # Tag autocomplete for django-tomselect
+    path('tag-autocomplete/', views.TagAutocomplete.as_view(), name='tag-autocomplete'),
+
+    # Operation Management URLs
+    path('operations/select/', views.SelectOperationView.as_view(), name='select_operation'),
+    path('operations/create/', views.CreateOperationView.as_view(), name='create_operation'),
+    path('operations/import/', views.ImportOperationView.as_view(), name='import_operation'),
+    path('operations/<str:operation_name>/activate/', views.activate_operation, name='activate_operation'),
+    path('operations/<str:operation_name>/edit/', views.UpdateOperationView.as_view(), name='edit_operation'),
+    path('operations/<str:operation_name>/delete/', views.DeleteOperationView.as_view(), name='delete_operation'),
 ]

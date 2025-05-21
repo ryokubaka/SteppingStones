@@ -82,16 +82,30 @@ CS Logs
         </div>
       </div>
     </div>
+    <!-- Logs per page dropdown at the bottom, centered -->
+    <div class="row mt-3">
+      <div class="col-md-12 d-flex justify-content-center">
+        <label for="record-limit" class="me-2 mb-0">Logs per page:</label>
+        <select class="form-select form-select-sm w-auto" id="record-limit">
+          <option value="10">10 records</option>
+          <option value="25">25 records</option>
+          <option value="50">50 records</option>
+          <option value="100">100 records</option>
+        </select>
+      </div>
+    </div>
   </div>
 
   <script nonce="{{request.csp_nonce}}">
     $(function () {
       $('[data-toggle="tooltip"]').tooltip();
       $.fn.dataTable.moment('{% datetime_format_moment %}');
-      $('.table').DataTable({
+      var table = $('.table').DataTable({
           "processing": true,
           "serverSide": true,
           "ajax": "{% url 'event_tracker:cs-actions-json' %}",
+          pageLength: 100,
+          lengthChange: false,
           language: {
             emptyTable: "<i class='fa fa-exclamation-triangle' aria-hidden='true'></i> No logs found, ensure they are being polled for or remove <a href='{% url 'event_tracker:cs-beacon-exclusion-list' %}'>beacon exclusions</a>.",
             searchBuilder: {
@@ -150,6 +164,12 @@ CS Logs
           ],
           drawCallback: tableDrawCallback
       } )
+
+      $('#record-limit').val('100');
+      $('#record-limit').on('change', function() {
+        var limit = $(this).val();
+        table.page.len(limit).draw();
+      });
     })
   </script>
 {%  endblock bootstrap5_content %}

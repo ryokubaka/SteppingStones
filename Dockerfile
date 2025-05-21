@@ -24,6 +24,11 @@ RUN python3.13 -m venv .venv && \
 
 # Install system dependencies including Java (openjdk-17-jre)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libldap2-dev \
+    libsasl2-dev \
+    libssl-dev \
+    ldap-utils \
     build-essential \
     libpq-dev \
     netcat-traditional \

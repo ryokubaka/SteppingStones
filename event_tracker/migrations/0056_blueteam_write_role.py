@@ -14,10 +14,39 @@ def create_applications_permissions():
         create_permissions(app_config)
 
 def rename_original_blueteam_role(apps, schema_editor):
+    print(f"Migration 0056: rename_original_blueteam_role called. Connection alias: {schema_editor.connection.alias}")
+    if schema_editor.connection.alias != 'default':
+        print(f"Migration 0056: rename_original_blueteam_role - Skipping on non-default DB alias: {schema_editor.connection.alias}")
+        return
+    print(f"Migration 0056: rename_original_blueteam_role - Proceeding on DB alias: {schema_editor.connection.alias}")
+    
     Group = apps.get_model('auth', 'Group')
-    orig_group = Group.objects.get(name="Client Blue Team")
-    orig_group.name = "Client Blue Team - Read Only"
-    orig_group.save()
+    original_name = "Client Blue Team"
+    new_name = "Client Blue Team - Read Only"
+
+    # If the new name already exists, assume the rename has been done or is handled.
+    if Group.objects.using('default').filter(name=new_name).exists():
+        print(f"Migration 0056: Group '{new_name}' already exists. Skipping rename of '{original_name}'.")
+        # Optionally, check if original_name still exists and log a warning if so, as it's an inconsistent state.
+        if Group.objects.using('default').filter(name=original_name).exists():
+            print(f"Migration 0056: Warning - Both '{original_name}' and '{new_name}' exist. Prioritizing existing '{new_name}'.")
+        return
+
+    try:
+        orig_group = Group.objects.using('default').get(name=original_name)
+        # Before saving, ensure the new_name hasn't been created by a concurrent process or an earlier step
+        # This is a double-check, primary check is above.
+        if not Group.objects.using('default').filter(name=new_name).exists():
+            orig_group.name = new_name
+            orig_group.save(using='default')
+            print(f"Migration 0056: Renamed group '{original_name}' to '{new_name}'.")
+        else:
+            # This case means new_name was created between the top check and here.
+            print(f"Migration 0056: Group '{new_name}' came into existence before save. Rename of '{original_name}' aborted.")
+    except Group.DoesNotExist:
+        print(f"Migration 0056: Original group '{original_name}' not found. Skipping rename (already renamed or never existed).")
+        # This is okay, implies it was already renamed or never existed.
+        pass # Or log a warning
 
 def undo_rename_original_blueteam_role(apps, schema_editor):
     Group = apps.get_model('auth', 'Group')
@@ -26,22 +55,40 @@ def undo_rename_original_blueteam_role(apps, schema_editor):
     orig_group.save()
 
 def create_blueteam_limited_write_role(apps, schema_editor):
-    create_applications_permissions()  # Ensure values exist in DB to reference.
-                                       # Not normally made by Django until after migration via a 'post_migrate' signal.
-
+    print(f"Migration 0056: create_blueteam_limited_write_role called. Connection alias: {schema_editor.connection.alias}")
+    if schema_editor.connection.alias != 'default':
+        print(f"Migration 0056: create_blueteam_limited_write_role - Skipping auth group operations on non-default DB alias: {schema_editor.connection.alias}")
+        return
+    
+    print(f"Migration 0056: create_blueteam_limited_write_role - Proceeding with auth group operations on DB alias: {schema_editor.connection.alias}")
+                                      
     Group = apps.get_model('auth', 'Group')
     Permission = apps.get_model('auth', 'Permission')
-    newgroup = Group(name="Client Blue Team - Limited Write")
-    newgroup.save()
+    
+    new_group_name = "Client Blue Team - Limited Write"
 
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacksubtechnique", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacktactic", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacktechnique", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_context", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_event", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_file", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_filedistribution", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_task", content_type__app_label="event_tracker"))
+    # Use get_or_create directly. It is atomic and handles existence check and creation.
+    newgroup, created = Group.objects.using('default').get_or_create(name=new_group_name)
+    
+    if created:
+        print(f"Migration 0056: Group '{new_group_name}' created via get_or_create on 'default' DB.")
+    else:
+        print(f"Migration 0056: Group '{new_group_name}' already existed on 'default' DB, fetched by get_or_create.")
+
+    permissions_to_add = [
+        ("view_attacksubtechnique", "event_tracker"),
+        ("view_attacktactic", "event_tracker"),
+        ("view_attacktechnique", "event_tracker"),
+        ("view_context", "event_tracker"),
+        ("view_event", "event_tracker"),
+        ("view_file", "event_tracker"),
+        ("view_filedistribution", "event_tracker"),
+        ("view_task", "event_tracker"),
+    ]
+
+    for codename, app_label in permissions_to_add:
+        permission = Permission.objects.get(codename=codename, content_type__app_label=app_label)
+        newgroup.permissions.add(permission)
 
     # Special permissions for the Limited Write
     newgroup.permissions.add(Permission.objects.get(codename="change_event_limited", content_type__app_label="event_tracker"))

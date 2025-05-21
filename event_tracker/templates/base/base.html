@@ -144,9 +144,45 @@
             {% endif %}
           </ul>
 
+          {% comment %} Insert Operation Switcher Dropdown before Admin/User section {% endcomment %}
+          <ul class="navbar-nav ms-auto mb-2 mb-lg-0"> {# Use ms-auto to push to the right, or remove if it should be part of the left group before it wraps #}
+            {% if user.is_authenticated and global_operations_list %}
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle" href="#" id="operationSwitcherDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                {% if active_operation_display_name %}
+                  Op: {{ active_operation_display_name|truncatechars:20 }}
+                {% else %}
+                  Select Operation
+                {% endif %}
+              </a>
+              <ul class="dropdown-menu" aria-labelledby="operationSwitcherDropdown">
+                {% for op in global_operations_list %}
+                <li>
+                  <a class="dropdown-item {% if op.name == active_operation_name_session %}active{% endif %}" href="{% url 'event_tracker:activate_operation' op.name %}?next={{ request.get_full_path|urlencode }}">
+                    {{ op.display_name }}
+                  </a>
+                </li>
+                {% endfor %}
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="{% url 'event_tracker:select_operation' %}">Manage Operations</a></li>
+              </ul>
+            </li>
+            {% elif user.is_authenticated %}
+            <li class="nav-item">
+                <a class="nav-link" href="{% url 'event_tracker:select_operation' %}">Select/Create Operation</a>
+            </li>
+            {% endif %}
+          </ul>
+          {% comment %} End Operation Switcher Dropdown {% endcomment %}
+
           {% block filter %}{% endblock filter %}
 
           <ul class="navbar-nav">
+            {% if user.is_staff %}
+            <li class="nav-item">
+              <a class="nav-link" href="{% url 'admin:index' %}">Admin Portal</a>
+            </li>
+            {% endif %}
             <li class="nav-item py-2 py-lg-1 col-12 col-lg-auto">
               <div class="vr d-none d-lg-flex h-100 mx-lg-2 text-white"></div>
               <hr class="d-lg-none my-2 text-white-50">

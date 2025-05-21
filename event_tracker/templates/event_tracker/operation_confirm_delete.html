@@ -1,0 +1,19 @@
+{% extends "base/base.html" %}
+{% load django_bootstrap5 %}
+
+{% block title %}Delete Operation{% endblock title %}
+
+{% block body %}
+<div class="container mt-4">
+    <h2>Delete Operation</h2>
+    <div class="alert alert-danger">
+        <strong>Warning:</strong> This will permanently delete the operation <strong>{{ object.display_name }}</strong> ({{ object.name }}) and its associated database file.<br>
+        This action cannot be undone.
+    </div>
+    <form method="post">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-danger">Yes, delete operation</button>
+        <a href="{% url 'event_tracker:select_operation' %}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock body %} 

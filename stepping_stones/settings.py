@@ -21,7 +21,17 @@ environ.Env.read_env()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+OPS_DATA_DIR = BASE_DIR / 'ops-data'
 
+# Ensure OPS_DATA_DIR exists when settings are loaded
+if not OPS_DATA_DIR.exists():
+    OPS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # print(f"Created OPS_DATA_DIR at {OPS_DATA_DIR}") # Optional: for logging during startup
+
+AUTHENTICATION_BACKENDS = [
+    'event_tracker.auth.DynamicLDAPBackend',  # Try LDAP first if enabled
+    'event_tracker.auth.FallbackBackend',     # Fall back to database auth
+] 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
@@ -31,7 +41,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = env('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-#DEBUG = True
 DEBUG = env('DJANGO_DEBUG', default=False, cast=bool)
 
 # Application definition
@@ -60,6 +69,8 @@ INSTALLED_APPS = [
     'markdown_reports',
     'external_tool_reports',
     'import_export',
+    'django_tomselect',
+    'rest_framework',
 ]
 
 MIDDLEWARE = [
@@ -70,6 +81,8 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
+    'django_tomselect.middleware.TomSelectMiddleware',
+    'event_tracker.middleware.OperationMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'event_tracker.middleware.TimezoneMiddleware',
     'event_tracker.middleware.InitialConfigMiddleware',
@@ -81,7 +94,7 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'stepping_stones.urls'
 
 # Redirect to home URL after login (Default redirects to /accounts/profile/)
-LOGIN_REDIRECT_URL = '/event-tracker/1'
+LOGIN_REDIRECT_URL = '/'
 
 TEMPLATES = [
     {
@@ -95,7 +108,12 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-                'event_tracker.context_processors.theme.apply_theme'
+                'event_tracker.context_processors.apply_theme',
+                'event_tracker.context_processors.operations_list_processor',
+                # 'event_tracker.context_processors.selected_event_type',
+                # 'event_tracker.context_processors.ui_preferences',
+                # 'event_tracker.context_processors.current_version_context',
+                'django_tomselect.context_processors.tomselect',
             ],
         },
     },
@@ -110,12 +128,24 @@ WSGI_APPLICATION = 'stepping_stones.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3', # This DB will store Users, Operations, etc.
         'OPTIONS': {
             'timeout': 20,  # Increase from default of 5 to avoid locked DB errors
+            'check_same_thread': False,  # Disable thread checking
+        }
+    },
+    'active_op_db': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': OPS_DATA_DIR / '_placeholder_op.sqlite3',
+        'OPTIONS': {
+            'timeout': 20,
+            'check_same_thread': False,  # Disable thread checking
         }
     }
 }
+
+# Setting for database router
+DATABASE_ROUTERS = ['stepping_stones.db_router.OperationRouter'] # Assuming router will be at stepping_stones.db_router
 
 
 # Password validation
@@ -229,3 +259,42 @@ matplotlib.use('agg')
 
 IMPORT_EXPORT_IMPORT_PERMISSION_CODE = "add"
 IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
+IMPORT_EXPORT_SKIP_ADMIN_LOG = True  # Disable import-export's database health checks
+
+# Logging configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[%(levelname)s] %(message)s'
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'cobalt_strike_monitor': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False
+        },
+        'background_task': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False
+        },
+        'event_tracker.auth.ldap': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+} 

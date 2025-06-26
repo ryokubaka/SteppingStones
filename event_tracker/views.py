@@ -875,6 +875,238 @@ class CSActionListView(PermissionRequiredMixin, TemplateView):
     template_name = "cobalt_strike_monitor/cs_action_list.html"
 
 
+class GlobalSearchView(PermissionRequiredMixin, TemplateView):
+    permission_required = 'cobalt_strike_monitor.view_archive'
+    template_name = "cobalt_strike_monitor/global_search.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Get all available operations
+        from .models import Operation
+        from django.db import DEFAULT_DB_ALIAS
+        operations = Operation.objects.using(DEFAULT_DB_ALIAS).order_by('display_name')
+        context['operations'] = operations
+        return context
+
+
+class GlobalSearchJSONView(PermissionRequiredMixin, View):
+    permission_required = 'cobalt_strike_monitor.view_archive'
+    
+    def get(self, request, *args, **kwargs):
+        from .models import Operation
+        from django.db import DEFAULT_DB_ALIAS
+        from django.http import JsonResponse
+        from django.db import connections
+        from django.conf import settings
+        import json
+        
+        # --- JUMP TO ID SUPPORT ---
+        page_for_id = request.GET.get('page_for_id')
+        operation_name = request.GET.get('operation')
+        if page_for_id and operation_name:
+            # This is a jump-to-ID request for a specific operation
+            try:
+                operation = Operation.objects.using(DEFAULT_DB_ALIAS).get(name=operation_name)
+                db_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+                if not db_path.exists():
+                    return JsonResponse({'found': False, 'error': 'Database file not found'})
+                temp_db_name = f'temp_{operation_name}_{id(db_path)}'
+                connections.databases[temp_db_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_db_name]['NAME'] = str(db_path)
+                try:
+                    from cobalt_strike_monitor.models import CSAction
+                    queryset = CSAction.objects.using(temp_db_name).all().order_by('-start')
+                    try:
+                        target_id = int(page_for_id)
+                    except ValueError:
+                        return JsonResponse({'found': False, 'error': 'Invalid ID'})
+                    # Find the record
+                    target_record = queryset.filter(id=target_id).first()
+                    all_ids = list(queryset.values_list('id', flat=True).order_by('id'))
+                    if not target_record:
+                        return JsonResponse({'found': False, 'error': 'ID not found', 'debug': {'all_ids': all_ids, 'target_id': target_id}})
+                    # Count records with newer timestamps
+                    records_before = queryset.filter(start__gt=target_record.start).count()
+                    try:
+                        page_length = int(request.GET.get('length', 10))
+                    except (ValueError, TypeError):
+                        page_length = 10
+                    page_number = (records_before // page_length) + 1
+                    debug_info = {
+                        'all_ids': all_ids,
+                        'target_id': target_id,
+                        'target_timestamp': str(target_record.start),
+                        'records_before': records_before,
+                        'page_length': page_length,
+                        'page_number': page_number,
+                        'total_records': queryset.count(),
+                    }
+                    return JsonResponse({'found': True, 'page': page_number, 'debug': debug_info})
+                finally:
+                    if temp_db_name in connections.databases:
+                        del connections.databases[temp_db_name]
+            except Exception as e:
+                return JsonResponse({'found': False, 'error': str(e)})
+        # --- END JUMP TO ID ---
+        
+        # Get selected operations from request
+        selected_operations = request.GET.getlist('operations[]')
+        global_search = request.GET.get('global_search', '')
+        
+        if not selected_operations:
+            return JsonResponse({'data': []})
+        
+        results = {}
+        
+        for operation_name in selected_operations:
+            try:
+                # Get operation details
+                operation = Operation.objects.using(DEFAULT_DB_ALIAS).get(name=operation_name)
+                
+                # Create a temporary database connection for this operation
+                db_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+                logger.info(f"Database path: {db_path}")
+                
+                # Check if the database file exists
+                if not db_path.exists():
+                    logger.warning(f"Database file not found: {db_path}")
+                    results[operation_name] = {
+                        'display_name': operation.display_name,
+                        'data': [],
+                        'error': 'Database file not found'
+                    }
+                    continue
+                
+                # Create a temporary connection to this operation's database
+                temp_db_name = f'temp_{operation_name}_{id(db_path)}'  # Make unique
+                connections.databases[temp_db_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_db_name]['NAME'] = str(db_path)
+                
+                logger.info(f"Created temporary database connection: {temp_db_name}")
+                
+                try:
+                    # Query CSAction data for this operation using Django ORM
+                    from cobalt_strike_monitor.models import CSAction, Beacon, BeaconLog, Archive, Listener
+                    
+                    # Build the query with explicit database usage
+                    queryset = CSAction.objects.using(temp_db_name).select_related(
+                        'beacon__listener'
+                    ).prefetch_related(
+                        'beaconlog_set',
+                        'archive_set'
+                    )
+                    
+                    logger.info(f"Built queryset for operation {operation_name}")
+                    
+                    # Apply global search filter if provided
+                    if global_search:
+                        queryset = queryset.filter(
+                            Q(beacon__computer__icontains=global_search) |
+                            Q(beacon__user__icontains=global_search) |
+                            Q(beacon__process__icontains=global_search) |
+                            Q(beaconlog__data__icontains=global_search) |
+                            Q(archive__data__icontains=global_search) |
+                            Q(beaconlog__operator__icontains=global_search) |
+                            Q(archive__tactic__icontains=global_search)
+                        ).distinct()
+                        logger.info(f"Applied search filter for operation {operation_name}")
+                    
+                    # Order by start time (no limit - let DataTables handle pagination)
+                    queryset = queryset.order_by('-start')
+                    
+                    # Format the results
+                    formatted_rows = []
+                    for cs_action in queryset:
+                        # Get operator from beacon logs using the same database
+                        operator = cs_action.beaconlog_set.using(temp_db_name).filter(operator__isnull=False).first()
+                        operator_name = operator.operator if operator else None
+                        
+                        # Get tactic from archive using the same database
+                        tactic_archive = cs_action.archive_set.using(temp_db_name).filter(tactic__isnull=False).first()
+                        tactic = tactic_archive.tactic if tactic_archive else None
+                        
+                        # Build source info
+                        source = "-"
+                        if cs_action.beacon and cs_action.beacon.listener:
+                            source = cs_action.beacon.listener.althost or cs_action.beacon.listener.host or "-"
+                        
+                        # Build target info
+                        target_parts = []
+                        if cs_action.beacon:
+                            if cs_action.beacon.computer:
+                                target_parts.append(f"Computer: {cs_action.beacon.computer}")
+                            if cs_action.beacon.user:
+                                target_parts.append(f"User: {cs_action.beacon.user}")
+                            if cs_action.beacon.process:
+                                target_parts.append(f"Process: {cs_action.beacon.process} (PID: {cs_action.beacon.pid})")
+                        target = "; ".join(target_parts) if target_parts else "-"
+                        
+                        # Build description like the existing CSActionListJSON view
+                        formatted_description = ""
+                        
+                        # Get description (task data from archive)
+                        rowdescription = ", ".join(cs_action.archive_set.using(temp_db_name).filter(type="task").exclude(data="").values_list('data', flat=True))
+                        if rowdescription:
+                            formatted_description = f"<div class='description'>{html.escape(rowdescription)}</div>"
+
+                        # Get input (input data from archive)
+                        rowinput = chr(10).join(cs_action.archive_set.using(temp_db_name).filter(type="input").exclude(data="").values_list('data', flat=True))
+                        if rowinput:
+                            formatted_description += f"<div class='input'>{html.escape(rowinput)}</div>"
+
+                        # Get output (output and error data from beaconlog)
+                        rowoutput = chr(10).join(cs_action.beaconlog_set.using(temp_db_name)
+                                                .filter(Q(type__startswith="output") | Q(type="error")).exclude(data="")
+                                                .values_list('data', flat=True)).rstrip("\n")
+                        if rowoutput:
+                            formatted_description += f"<div class='output'>{html.escape(rowoutput)}</div>"
+
+                        if not formatted_description:
+                            formatted_description = "-"
+                        
+                        formatted_rows.append({
+                            'id': cs_action.id,
+                            'start': cs_action.start.isoformat() if cs_action.start else None,
+                            'operator': operator_name or "-",
+                            'source': source,
+                            'target': target,
+                            'description': formatted_description,
+                            'tactic': tactic or "-",
+                            'operation': operation.display_name
+                        })
+                    
+                    logger.info(f"Formatted {len(formatted_rows)} rows for operation {operation_name}")
+                    
+                    # Add some sample data for debugging
+                    if formatted_rows:
+                        sample_row = formatted_rows[0]
+                        logger.info(f"Sample row for {operation_name}: source={sample_row['source']}, target={sample_row['target'][:50]}...")
+                    
+                    results[operation_name] = {
+                        'display_name': operation.display_name,
+                        'data': formatted_rows
+                    }
+                    
+                finally:
+                    # Clean up the temporary connection
+                    if temp_db_name in connections.databases:
+                        del connections.databases[temp_db_name]
+                        logger.info(f"Cleaned up temporary database connection: {temp_db_name}")
+                    
+            except Exception as e:
+                # Log error and continue with other operations
+                logger.error(f"Error querying operation {operation_name}: {e}", exc_info=True)
+                results[operation_name] = {
+                    'display_name': operation.display_name if 'operation' in locals() else operation_name,
+                    'data': [],
+                    'error': str(e)
+                }
+                continue
+        
+        logger.info(f"Returning results for {len(results)} operations")
+        return JsonResponse({'data': results})
+
+
 class FilterableDatatableView(ABC, BaseDatatableView):
     filter_column_mapping = {}
 
@@ -958,8 +1190,8 @@ class FilterableDatatableView(ABC, BaseDatatableView):
 class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
     permission_required = 'cobalt_strike_monitor.view_archive'
     model = CSAction
-    columns = ['start', 'operator', 'source', 'target', 'data', 'tactic', '']
-    order_columns = ['start', 'operator_anno', '', '', '', 'tactic_anno', '']
+    columns = ['id', 'start', 'operator', 'source', 'target', 'data', 'tactic', '']
+    order_columns = ['id', 'start', 'operator_anno', '', '', '', 'tactic_anno', '']
     filter_column_mapping = {'Timestamp': 'start'}
 
 
@@ -967,15 +1199,25 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
         operator_subquery = BeaconLog.objects.filter(cs_action__id=OuterRef('pk'), operator__isnull=False)
         tactic_subquery = Archive.objects.filter(cs_action__id=OuterRef('pk'), tactic__isnull=False)
 
-        return (self.model.objects
+        qs = (self.model.objects
                 .filter(beacon__in=Beacon.visible_beacons())
                 .annotate(operator_anno=Subquery(operator_subquery.values("operator")[:1]))
-                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1]))
-                .distinct())
+                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1])))
+                # .distinct())  # Temporarily remove distinct to see if it's causing issues
+        
+        # Debug: Check what we're getting
+        print(f"DEBUG: get_initial_queryset - Total records: {qs.count()}")
+        print(f"DEBUG: get_initial_queryset - IDs: {list(qs.values_list('id', flat=True).order_by('id'))}")
+        
+        return qs
 
     def render_column(self, row, column):
         # We want to render some columns in a special way
-        if column == 'start':
+        if column == 'id':
+            # Debug: log the actual ID for this row
+            print(f"DEBUG: Rendering ID column for row {row.pk}: {row.id}")
+            return str(row.id)
+        elif column == 'start':
             return render_ts_local(row.start),
         elif column == 'source':
             if hasattr(row.beacon.listener, "althost") and row.beacon.listener.althost:
@@ -1027,6 +1269,17 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
             return truncatechars_html((super(CSActionListJSON, self).render_column(row, column)), 400)
 
     def filter_queryset_by_searchterm(self, qs, term):
+        # Check if the search term is a number (potential ID search)
+        try:
+            id_search = int(term)
+            # If it's a number, search by ID first
+            id_qs = qs.filter(id=id_search)
+            if id_qs.exists():
+                return id_qs
+        except ValueError:
+            # Not a number, continue with regular search
+            pass
+        
         q = Q(beacon__listener__althost__icontains=term) | Q(beacon__listener__host__icontains=term) | \
             Q(beacon__computer__icontains=term) | Q(beacon__user__icontains=term) | Q(
             beacon__process__icontains=term) | \
@@ -1036,6 +1289,78 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
         # Adding more Q objects via filter() or using intersection is weirdly very slow, nested queries is equivalent
         # and gives the same output
         return qs.filter(pk__in=self.get_initial_queryset().filter(q).distinct().values("pk"))
+
+    def get_page_for_id(self, target_id):
+        """Find the page number for a specific ID without filtering the table."""
+        try:
+            target_id = int(target_id)
+        except ValueError:
+            return None
+            
+        # Get the base queryset
+        base_qs = self.get_initial_queryset()
+        
+        # Debug: Check what IDs exist in the database
+        all_ids = list(base_qs.values_list('id', flat=True).order_by('id'))
+        print(f"DEBUG: All IDs in database: {all_ids}")
+        
+        # Check if the ID exists
+        target_record = base_qs.filter(id=target_id).first()
+        if not target_record:
+            print(f"DEBUG: ID {target_id} not found in database")
+            print(f"DEBUG: Available IDs: {all_ids}")
+            return None
+            
+        # The table is ordered by timestamp descending (newest first), not by ID
+        # So we need to count how many records have timestamps newer than our target
+        records_before = base_qs.filter(start__gt=target_record.start).count()
+        
+        # Get the actual page length from the request or use default
+        page_length = 100  # Default page length
+        if hasattr(self, 'request') and self.request:
+            try:
+                page_length = int(self.request.GET.get('length', 100))
+            except (ValueError, TypeError):
+                pass
+        
+        # Calculate page number
+        page_number = (records_before // page_length) + 1
+        
+        # Debug logging
+        print(f"DEBUG: Looking for ID {target_id}")
+        print(f"DEBUG: Target timestamp: {target_record.start}")
+        print(f"DEBUG: Records with newer timestamps: {records_before}")
+        print(f"DEBUG: Page length: {page_length}")
+        print(f"DEBUG: Calculated page: {page_number}")
+        
+        # Additional verification - let's see what's actually on the calculated page
+        total_records = base_qs.count()
+        print(f"DEBUG: Total records in database: {total_records}")
+        
+        # Let's check what's on the first page by simulating the DataTables query
+        first_page_records = base_qs.order_by('-start')[:page_length]
+        first_page_ids = list(first_page_records.values_list('id', flat=True))
+        print(f"DEBUG: IDs on first page: {first_page_ids}")
+        
+        return page_number
+
+    def get(self, request, *args, **kwargs):
+        """Handle GET requests for DataTables and page lookup."""
+        # Check if this is a page lookup request
+        target_id = request.GET.get('page_for_id')
+        if target_id:
+            # Debug: log what we received
+            print(f"DEBUG: Received page_for_id request for ID: {target_id}")
+            print(f"DEBUG: Request GET params: {dict(request.GET)}")
+            
+            page_number = self.get_page_for_id(target_id)
+            if page_number is not None:
+                return JsonResponse({'page': page_number, 'found': True})
+            else:
+                return JsonResponse({'found': False, 'error': 'ID not found'})
+        
+        # Otherwise, handle as normal DataTables request
+        return super().get(request, *args, **kwargs)
 
 # -- EventStream List
 

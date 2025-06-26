@@ -22,8 +22,8 @@ CS Logs
         monospaceFontURL: '{{request.scheme}}://{{request.META.HTTP_HOST}}{% static "fonts/RobotoMono-Regular.ttf" %}',
         brandingSVG: '{{REPORT_FOOTER_IMAGE}}',
         brandingText: '{{REPORT_FOOTER_TEXT}}',
-        totalColumns: 7,
-        descriptionColumn: 4,
+        totalColumns: 8,
+        descriptionColumn: 5,
     }
     </script>
     
@@ -32,7 +32,7 @@ CS Logs
         margin-left: 30px; margin-bottom: 0px
     }
 
-    table.dataTable tr td:nth-child(4) {
+    table.dataTable tr td:nth-child(6) {
         word-break: break-all;
     }
     .dt-buttons {
@@ -62,10 +62,29 @@ CS Logs
 <div class="container-fluid">
     <div class="row">
       <div class="col-md-12">
+        <!-- Jump to ID feature -->
+        <div class="mt-2 mb-3">
+          <div class="row align-items-center">
+            <div class="col-md-3">
+              <div class="input-group">
+                <span class="input-group-text">Jump to ID</span>
+                <input type="number" class="form-control" id="jump-to-id" placeholder="Enter ID number" min="1">
+                <button class="btn btn-outline-secondary" type="button" id="jump-to-id-btn">
+                  <i class="fas fa-search"></i> Go
+                </button>
+              </div>
+            </div>
+            <div class="col-md-9">
+              <small class="text-muted">Enter a record ID to quickly navigate to that specific log entry</small>
+            </div>
+          </div>
+        </div>
+        
         <div class="mt-2">
             <table class="table table-sm table-striped">
               <thead>
                 <tr>
+                  <th scope="col">ID</th>
                   <th scope="col">Timestamp</th>
                   <th scope="col">Operator</th>
                   <th scope="col">Source</th>
@@ -100,10 +119,14 @@ CS Logs
     $(function () {
       $('[data-toggle="tooltip"]').tooltip();
       $.fn.dataTable.moment('{% datetime_format_moment %}');
+      
+      // Global variable to track jump to ID target
+      var jumpToIdTarget = null;
+      
       var table = $('.table').DataTable({
-          "processing": true,
-          "serverSide": true,
-          "ajax": "{% url 'event_tracker:cs-actions-json' %}",
+          processing: true,
+          serverSide: true,
+          ajax: "{% url 'event_tracker:cs-actions-json' %}",
           pageLength: 100,
           lengthChange: false,
           language: {
@@ -152,17 +175,56 @@ CS Logs
             header: true,
             headerOffset: $('.navbar').outerHeight()
           },
-          order: [[0, 'desc']],
+          order: [[1, 'desc']],
           columns: [
-            { searchBuilderType: "moment-{% datetime_format_moment %}", width: "10%" },
-            { orderable: true, width: "6%" },
-            { orderable: false, width: "12%" },
-            { orderable: false, width: "12%" },
-            { orderable: false, render: descriptionRender, width: "50%" },
-            { orderable: true, width: "5%" },
-            { orderable: false, width: "5%" },
+            { data: 'id', orderable: true, width: "5%" },
+            { data: 'start', width: "10%" },
+            { data: 'operator', orderable: true, width: "6%" },
+            { data: 'source', orderable: false, width: "12%" },
+            { data: 'target', orderable: false, width: "12%" },
+            { data: 'data', orderable: false, render: descriptionRender, width: "45%" },
+            { data: 'tactic', orderable: true, width: "5%" },
+            { data: '', orderable: false, width: "5%" },
           ],
-          drawCallback: tableDrawCallback
+          drawCallback: function() {
+            // Apply expander to description cells
+            $('.table tbody tr td:nth-child(6)').expander({
+              slicePoint: 200, 
+              normalizeWhitespace: false, 
+              detailPrefix: ''
+            });
+            
+            // Check if we need to highlight a record after page load
+            if (jumpToIdTarget) {
+              var targetId = jumpToIdTarget;
+              // Clear any existing highlights
+              table.rows().nodes().each(function() {
+                $(this).removeClass('table-warning');
+              });
+              // Find and highlight the target record
+              var found = false;
+              table.rows().every(function() {
+                var rowData = this.data();
+                if (rowData && rowData.id == targetId) {
+                  var rowNode = this.node();
+                  $(rowNode).addClass('table-warning');
+                  found = true;
+                  setTimeout(function() {
+                    if (rowNode && typeof rowNode.scrollIntoView === 'function') {
+                      rowNode.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    }
+                  }, 100);
+                  return false; // break
+                }
+              });
+              if (!found) {
+                alert('ID ' + targetId + ' not found on the current page.');
+                jumpToIdTarget = null;
+              } else {
+                jumpToIdTarget = null; // Clear the target only if found
+              }
+            }
+          }
       } )
 
       $('#record-limit').val('100');
@@ -170,6 +232,61 @@ CS Logs
         var limit = $(this).val();
         table.page.len(limit).draw();
       });
+      
+      // Jump to ID functionality
+      $('#jump-to-id-btn').click(function() {
+        jumpToId();
+      });
+      
+      $('#jump-to-id').keypress(function(e) {
+        if (e.which === 13) { // Enter key
+          jumpToId();
+        }
+      });
+      
+      function jumpToId() {
+        var targetId = $('#jump-to-id').val().trim();
+        if (!targetId) {
+          alert('Please enter an ID number');
+          return;
+        }
+        
+        // Clear any existing highlights
+        table.rows().nodes().each(function() {
+          $(this).removeClass('table-warning');
+        });
+        
+        // Get current page length
+        var currentLength = table.page.len();
+        
+        // First, get the page number for this ID from the backend
+        $.ajax({
+          url: "{% url 'event_tracker:cs-actions-json' %}",
+          method: 'GET',
+          data: { 
+            page_for_id: targetId,
+            length: currentLength // Pass current page length
+          },
+          success: function(response) {
+            if (response.found) {
+              // Set the target ID to highlight after page load
+              jumpToIdTarget = targetId;
+              
+              // Clear the search box and redraw
+              table.search('').draw();
+              
+              // Navigate to the page containing the ID
+              table.page(response.page - 1).draw('page'); // DataTables uses 0-based indexing
+              
+            } else {
+              alert('ID ' + targetId + ' not found in the database');
+            }
+          },
+          error: function() {
+            alert('Error looking up ID ' + targetId);
+          }
+        });
+      }
     })
   </script>
 {%  endblock bootstrap5_content %}

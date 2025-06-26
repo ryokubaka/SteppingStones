@@ -191,7 +191,7 @@ STATIC_URL = '/static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CSRF_TRUSTED_ORIGINS = ['https://*.example.net','http://127.0.0.1']
+CSRF_TRUSTED_ORIGINS = ['https://*.example.net','http://127.0.0.1:4321','https://127.0.0.1']
 
 USE_X_FORWARDED_HOST = True
 #ALLOWED_HOSTS = ['.localhost', '127.0.0.1', '[::1]', '.example.net']

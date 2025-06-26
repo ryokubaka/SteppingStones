@@ -21,6 +21,7 @@ services:
         python manage.py migrate_all_ops &&
         python manage.py runserver 0.0.0.0:8000 --insecure
       "
+    restart: always
 
   tasks:
     image: stepping_stones
@@ -30,7 +31,6 @@ services:
       - /opt/cobaltstrike:/opt/cobaltstrike
     depends_on:
       - app
-    restart: unless-stopped
     command: |
       sh -c "
         if [ -f db.sqlite3 ]; then
@@ -40,6 +40,7 @@ services:
         fi
         python manage.py process_tasks
       "
+    restart: always
 
   web:
     image: nginx:latest
@@ -51,7 +52,8 @@ services:
       - ./certs/:/etc/nginx/certs/:ro
     depends_on:
       - app
-
+    restart: always
+    
 volumes:
   sqlite_data:
     driver: local

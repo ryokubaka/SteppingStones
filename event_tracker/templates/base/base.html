@@ -112,6 +112,7 @@
                 {% endif %}
                 {% if perms.cobalt_strike_monitor.view_archive %}
                 <li><a class="dropdown-item" href="{% url 'event_tracker:cs-actions-list' %}">Logs</a></li>
+                <li><a class="dropdown-item" href="{% url 'event_tracker:cs-global-search' %}">Global Search</a></li>
                 <li><a class="dropdown-item" href="{% url 'event_tracker:cs-uploads-list' %}">Uploads</a></li>
                 {% endif %}
                 {% if perms.cobalt_strike_monitor.view_download  %}

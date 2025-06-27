@@ -1,0 +1,57 @@
+{% extends "base/base.html" %}
+{% load django_bootstrap5 %}
+
+{% block title %}Select Operation{% endblock title %}
+
+{% block body %}
+<div class="container mt-4">
+    <h2>Select Operation</h2>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if current_op_name %}
+        <div class="alert alert-info">
+            Currently active operation: <strong>{{ request.current_operation.display_name|default:current_op_name }}</strong>
+        </div>
+    {% else %}
+        <div class="alert alert-warning">
+            No operation is currently active. Please select or create an operation.
+        </div>
+    {% endif %}
+
+    <div class="mb-3">
+        <a href="{% url 'event_tracker:create_operation' %}" class="btn btn-success">Create New Operation</a>
+        <a href="{% url 'event_tracker:import_operation' %}" class="btn btn-primary">Import Operation</a>
+    </div>
+
+    {% if operations %}
+        <ul class="list-group">
+            {% for operation in operations %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>{{ operation.display_name }}</strong> ({{ operation.name }})
+                    </div>
+                    <div class="btn-group">
+                        {% if operation.name == current_op_name %}
+                            <span class="badge bg-primary rounded-pill">Active</span>
+                        {% else %}
+                            <a href="{% url 'event_tracker:activate_operation' operation_name=operation.name %}" class="btn btn-sm btn-outline-primary">Activate</a>
+                        {% endif %}
+                        <a href="{% url 'event_tracker:edit_operation' operation.name %}" class="btn btn-sm btn-outline-secondary ms-2">Edit</a>
+                        <a href="{% url 'event_tracker:delete_operation' operation.name %}" class="btn btn-sm btn-outline-danger ms-2" onclick="return confirm('Are you sure you want to delete this operation? This will also delete the associated database file.');">Delete</a>
+                    </div>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No operations found. Please create one.</p>
+    {% endif %}
+</div>
+{% endblock body %} 

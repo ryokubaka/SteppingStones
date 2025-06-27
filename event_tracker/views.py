@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import string
+import time  # Add time module import
 from abc import ABC, abstractmethod
 from io import BytesIO
 from json import JSONDecodeError
@@ -14,12 +15,12 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from ansi2html import Ansi2HTMLConverter
 from dal_select2_taggit.widgets import TaggitSelect2
 from django import forms
-from django.contrib.auth.decorators import permission_required
+from django.contrib.auth.decorators import permission_required, login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.mixins import UserPassesTestMixin, PermissionRequiredMixin, LoginRequiredMixin
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, AnonymousUser
 from django.contrib.staticfiles import finders
-from django.db import transaction, connection
+from django.db import transaction, connection, DEFAULT_DB_ALIAS, connections
 from django.db.models import Max, Q, Subquery, OuterRef
 from django.db.models.functions import Greatest, Coalesce
 from django.forms import inlineformset_factory
@@ -28,10 +29,11 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.template.defaultfilters import truncatechars_html
 from django.utils import timezone, html
 from django.utils.dateparse import parse_datetime
+from django.utils.http import url_has_allowed_host_and_scheme # CHANGED IMPORT
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.views import View
-from django.views.generic import ListView, TemplateView
+from django.views.generic import ListView, TemplateView, CreateView, DeleteView, UpdateView, FormView
 from django_datatables_view.base_datatable_view import BaseDatatableView
 from djangoplugins.models import ENABLED
 from jsonschema.exceptions import ValidationError
@@ -45,10 +47,9 @@ from cobalt_strike_monitor.models import TeamServer, Archive, Beacon, BeaconExcl
 from cobalt_strike_monitor.poll_team_server import healthcheck_teamserver
 from .models import Task, Event, AttackTactic, AttackTechnique, Context, AttackSubTechnique, FileDistribution, File, \
     EventMapping, Webhook, BeaconReconnectionWatcher, BloodhoundServer, UserPreferences, \
-    ImportedEvent
+    ImportedEvent, Operation, CurrentOperation
 from django.urls import reverse_lazy, reverse
-from django.views.generic.edit import CreateView, DeleteView, UpdateView, FormView
-from datetime import datetime
+from django.contrib import messages
 
 from dal import autocomplete
 
@@ -58,6 +59,41 @@ from .signals import cs_beacon_to_context, cs_indicator_archive_to_file, notify_
 from .templatetags.custom_tags import render_ts_local
 from .event_detail_suggester.suggester import generate_suggestions
 from .views_bloodhound import get_bh_users, get_bh_hosts
+
+from django.conf import settings # For OPS_DATA_DIR
+
+from .forms import OperationForm, ImportOperationForm # Explicit import right before the class
+
+# django-tomselect autocomplete view for Tags
+from django_tomselect.autocompletes import AutocompleteModelView # Changed from AutocompleteView
+from taggit.models import Tag
+
+import logging # Add this
+
+logger = logging.getLogger(__name__) # Add this
+
+class TagAutocomplete(AutocompleteModelView): # Changed base class
+    model = Tag # This is correct for AutocompleteModelView
+    search_lookups = ["name__icontains"]
+
+    # get_queryset is often not strictly needed if model and search_lookups are set
+    # but it's fine to keep for explicitness or further customization.
+    def get_queryset(self):
+        # The OperationRouter should handle routing for the Tag model based on its app_label ('taggit')
+        # if 'taggit' is in op_specific_apps in db_router.py.
+        # For django-tomselect, AutocompleteModelView will use the default manager of self.model.
+        # If routing is set up correctly, this should query 'active_op_db'.
+        qs = super().get_queryset() # It's good practice to call super().get_queryset()
+        if self.q:
+            # This custom filtering is redundant if search_lookups is doing its job
+            # qs = qs.filter(name__icontains=self.q)
+            # However, search_lookups handles this more robustly (e.g. multiple terms)
+            pass # Rely on search_lookups defined on the class
+        return qs
+
+    # If you need to customize how the JSON response is structured (e.g., value/label fields),
+    # you might override get_result_value or get_result_label, but TomSelectConfig
+    # in forms.py (value_field='name', label_field='name') should handle this for tags.
 
 
 @permission_required('event_tracker.view_task')
@@ -839,6 +875,238 @@ class CSActionListView(PermissionRequiredMixin, TemplateView):
     template_name = "cobalt_strike_monitor/cs_action_list.html"
 
 
+class GlobalSearchView(PermissionRequiredMixin, TemplateView):
+    permission_required = 'cobalt_strike_monitor.view_archive'
+    template_name = "cobalt_strike_monitor/global_search.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Get all available operations
+        from .models import Operation
+        from django.db import DEFAULT_DB_ALIAS
+        operations = Operation.objects.using(DEFAULT_DB_ALIAS).order_by('display_name')
+        context['operations'] = operations
+        return context
+
+
+class GlobalSearchJSONView(PermissionRequiredMixin, View):
+    permission_required = 'cobalt_strike_monitor.view_archive'
+    
+    def get(self, request, *args, **kwargs):
+        from .models import Operation
+        from django.db import DEFAULT_DB_ALIAS
+        from django.http import JsonResponse
+        from django.db import connections
+        from django.conf import settings
+        import json
+        
+        # --- JUMP TO ID SUPPORT ---
+        page_for_id = request.GET.get('page_for_id')
+        operation_name = request.GET.get('operation')
+        if page_for_id and operation_name:
+            # This is a jump-to-ID request for a specific operation
+            try:
+                operation = Operation.objects.using(DEFAULT_DB_ALIAS).get(name=operation_name)
+                db_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+                if not db_path.exists():
+                    return JsonResponse({'found': False, 'error': 'Database file not found'})
+                temp_db_name = f'temp_{operation_name}_{id(db_path)}'
+                connections.databases[temp_db_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_db_name]['NAME'] = str(db_path)
+                try:
+                    from cobalt_strike_monitor.models import CSAction
+                    queryset = CSAction.objects.using(temp_db_name).all().order_by('-start')
+                    try:
+                        target_id = int(page_for_id)
+                    except ValueError:
+                        return JsonResponse({'found': False, 'error': 'Invalid ID'})
+                    # Find the record
+                    target_record = queryset.filter(id=target_id).first()
+                    all_ids = list(queryset.values_list('id', flat=True).order_by('id'))
+                    if not target_record:
+                        return JsonResponse({'found': False, 'error': 'ID not found', 'debug': {'all_ids': all_ids, 'target_id': target_id}})
+                    # Count records with newer timestamps
+                    records_before = queryset.filter(start__gt=target_record.start).count()
+                    try:
+                        page_length = int(request.GET.get('length', 10))
+                    except (ValueError, TypeError):
+                        page_length = 10
+                    page_number = (records_before // page_length) + 1
+                    debug_info = {
+                        'all_ids': all_ids,
+                        'target_id': target_id,
+                        'target_timestamp': str(target_record.start),
+                        'records_before': records_before,
+                        'page_length': page_length,
+                        'page_number': page_number,
+                        'total_records': queryset.count(),
+                    }
+                    return JsonResponse({'found': True, 'page': page_number, 'debug': debug_info})
+                finally:
+                    if temp_db_name in connections.databases:
+                        del connections.databases[temp_db_name]
+            except Exception as e:
+                return JsonResponse({'found': False, 'error': str(e)})
+        # --- END JUMP TO ID ---
+        
+        # Get selected operations from request
+        selected_operations = request.GET.getlist('operations[]')
+        global_search = request.GET.get('global_search', '')
+        
+        if not selected_operations:
+            return JsonResponse({'data': []})
+        
+        results = {}
+        
+        for operation_name in selected_operations:
+            try:
+                # Get operation details
+                operation = Operation.objects.using(DEFAULT_DB_ALIAS).get(name=operation_name)
+                
+                # Create a temporary database connection for this operation
+                db_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+                logger.info(f"Database path: {db_path}")
+                
+                # Check if the database file exists
+                if not db_path.exists():
+                    logger.warning(f"Database file not found: {db_path}")
+                    results[operation_name] = {
+                        'display_name': operation.display_name,
+                        'data': [],
+                        'error': 'Database file not found'
+                    }
+                    continue
+                
+                # Create a temporary connection to this operation's database
+                temp_db_name = f'temp_{operation_name}_{id(db_path)}'  # Make unique
+                connections.databases[temp_db_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_db_name]['NAME'] = str(db_path)
+                
+                logger.info(f"Created temporary database connection: {temp_db_name}")
+                
+                try:
+                    # Query CSAction data for this operation using Django ORM
+                    from cobalt_strike_monitor.models import CSAction, Beacon, BeaconLog, Archive, Listener
+                    
+                    # Build the query with explicit database usage
+                    queryset = CSAction.objects.using(temp_db_name).select_related(
+                        'beacon__listener'
+                    ).prefetch_related(
+                        'beaconlog_set',
+                        'archive_set'
+                    )
+                    
+                    logger.info(f"Built queryset for operation {operation_name}")
+                    
+                    # Apply global search filter if provided
+                    if global_search:
+                        queryset = queryset.filter(
+                            Q(beacon__computer__icontains=global_search) |
+                            Q(beacon__user__icontains=global_search) |
+                            Q(beacon__process__icontains=global_search) |
+                            Q(beaconlog__data__icontains=global_search) |
+                            Q(archive__data__icontains=global_search) |
+                            Q(beaconlog__operator__icontains=global_search) |
+                            Q(archive__tactic__icontains=global_search)
+                        ).distinct()
+                        logger.info(f"Applied search filter for operation {operation_name}")
+                    
+                    # Order by start time (no limit - let DataTables handle pagination)
+                    queryset = queryset.order_by('-start')
+                    
+                    # Format the results
+                    formatted_rows = []
+                    for cs_action in queryset:
+                        # Get operator from beacon logs using the same database
+                        operator = cs_action.beaconlog_set.using(temp_db_name).filter(operator__isnull=False).first()
+                        operator_name = operator.operator if operator else None
+                        
+                        # Get tactic from archive using the same database
+                        tactic_archive = cs_action.archive_set.using(temp_db_name).filter(tactic__isnull=False).first()
+                        tactic = tactic_archive.tactic if tactic_archive else None
+                        
+                        # Build source info
+                        source = "-"
+                        if cs_action.beacon and cs_action.beacon.listener:
+                            source = cs_action.beacon.listener.althost or cs_action.beacon.listener.host or "-"
+                        
+                        # Build target info
+                        target_parts = []
+                        if cs_action.beacon:
+                            if cs_action.beacon.computer:
+                                target_parts.append(f"Computer: {cs_action.beacon.computer}")
+                            if cs_action.beacon.user:
+                                target_parts.append(f"User: {cs_action.beacon.user}")
+                            if cs_action.beacon.process:
+                                target_parts.append(f"Process: {cs_action.beacon.process} (PID: {cs_action.beacon.pid})")
+                        target = "; ".join(target_parts) if target_parts else "-"
+                        
+                        # Build description like the existing CSActionListJSON view
+                        formatted_description = ""
+                        
+                        # Get description (task data from archive)
+                        rowdescription = ", ".join(cs_action.archive_set.using(temp_db_name).filter(type="task").exclude(data="").values_list('data', flat=True))
+                        if rowdescription:
+                            formatted_description = f"<div class='description'>{html.escape(rowdescription)}</div>"
+
+                        # Get input (input data from archive)
+                        rowinput = chr(10).join(cs_action.archive_set.using(temp_db_name).filter(type="input").exclude(data="").values_list('data', flat=True))
+                        if rowinput:
+                            formatted_description += f"<div class='input'>{html.escape(rowinput)}</div>"
+
+                        # Get output (output and error data from beaconlog)
+                        rowoutput = chr(10).join(cs_action.beaconlog_set.using(temp_db_name)
+                                                .filter(Q(type__startswith="output") | Q(type="error")).exclude(data="")
+                                                .values_list('data', flat=True)).rstrip("\n")
+                        if rowoutput:
+                            formatted_description += f"<div class='output'>{html.escape(rowoutput)}</div>"
+
+                        if not formatted_description:
+                            formatted_description = "-"
+                        
+                        formatted_rows.append({
+                            'id': cs_action.id,
+                            'start': cs_action.start.isoformat() if cs_action.start else None,
+                            'operator': operator_name or "-",
+                            'source': source,
+                            'target': target,
+                            'description': formatted_description,
+                            'tactic': tactic or "-",
+                            'operation': operation.display_name
+                        })
+                    
+                    logger.info(f"Formatted {len(formatted_rows)} rows for operation {operation_name}")
+                    
+                    # Add some sample data for debugging
+                    if formatted_rows:
+                        sample_row = formatted_rows[0]
+                        logger.info(f"Sample row for {operation_name}: source={sample_row['source']}, target={sample_row['target'][:50]}...")
+                    
+                    results[operation_name] = {
+                        'display_name': operation.display_name,
+                        'data': formatted_rows
+                    }
+                    
+                finally:
+                    # Clean up the temporary connection
+                    if temp_db_name in connections.databases:
+                        del connections.databases[temp_db_name]
+                        logger.info(f"Cleaned up temporary database connection: {temp_db_name}")
+                    
+            except Exception as e:
+                # Log error and continue with other operations
+                logger.error(f"Error querying operation {operation_name}: {e}", exc_info=True)
+                results[operation_name] = {
+                    'display_name': operation.display_name if 'operation' in locals() else operation_name,
+                    'data': [],
+                    'error': str(e)
+                }
+                continue
+        
+        logger.info(f"Returning results for {len(results)} operations")
+        return JsonResponse({'data': results})
+
+
 class FilterableDatatableView(ABC, BaseDatatableView):
     filter_column_mapping = {}
 
@@ -922,8 +1190,8 @@ class FilterableDatatableView(ABC, BaseDatatableView):
 class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
     permission_required = 'cobalt_strike_monitor.view_archive'
     model = CSAction
-    columns = ['start', 'operator', 'source', 'target', 'data', 'tactic', '']
-    order_columns = ['start', 'operator_anno', '', '', '', 'tactic_anno', '']
+    columns = ['id', 'start', 'operator', 'source', 'target', 'data', 'tactic', '']
+    order_columns = ['id', 'start', 'operator_anno', '', '', '', 'tactic_anno', '']
     filter_column_mapping = {'Timestamp': 'start'}
 
 
@@ -931,15 +1199,25 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
         operator_subquery = BeaconLog.objects.filter(cs_action__id=OuterRef('pk'), operator__isnull=False)
         tactic_subquery = Archive.objects.filter(cs_action__id=OuterRef('pk'), tactic__isnull=False)
 
-        return (self.model.objects
+        qs = (self.model.objects
                 .filter(beacon__in=Beacon.visible_beacons())
                 .annotate(operator_anno=Subquery(operator_subquery.values("operator")[:1]))
-                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1]))
-                .distinct())
+                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1])))
+                # .distinct())  # Temporarily remove distinct to see if it's causing issues
+        
+        # Debug: Check what we're getting
+        print(f"DEBUG: get_initial_queryset - Total records: {qs.count()}")
+        print(f"DEBUG: get_initial_queryset - IDs: {list(qs.values_list('id', flat=True).order_by('id'))}")
+        
+        return qs
 
     def render_column(self, row, column):
         # We want to render some columns in a special way
-        if column == 'start':
+        if column == 'id':
+            # Debug: log the actual ID for this row
+            print(f"DEBUG: Rendering ID column for row {row.pk}: {row.id}")
+            return str(row.id)
+        elif column == 'start':
             return render_ts_local(row.start),
         elif column == 'source':
             if hasattr(row.beacon.listener, "althost") and row.beacon.listener.althost:
@@ -991,6 +1269,17 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
             return truncatechars_html((super(CSActionListJSON, self).render_column(row, column)), 400)
 
     def filter_queryset_by_searchterm(self, qs, term):
+        # Check if the search term is a number (potential ID search)
+        try:
+            id_search = int(term)
+            # If it's a number, search by ID first
+            id_qs = qs.filter(id=id_search)
+            if id_qs.exists():
+                return id_qs
+        except ValueError:
+            # Not a number, continue with regular search
+            pass
+        
         q = Q(beacon__listener__althost__icontains=term) | Q(beacon__listener__host__icontains=term) | \
             Q(beacon__computer__icontains=term) | Q(beacon__user__icontains=term) | Q(
             beacon__process__icontains=term) | \
@@ -1000,6 +1289,78 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
         # Adding more Q objects via filter() or using intersection is weirdly very slow, nested queries is equivalent
         # and gives the same output
         return qs.filter(pk__in=self.get_initial_queryset().filter(q).distinct().values("pk"))
+
+    def get_page_for_id(self, target_id):
+        """Find the page number for a specific ID without filtering the table."""
+        try:
+            target_id = int(target_id)
+        except ValueError:
+            return None
+            
+        # Get the base queryset
+        base_qs = self.get_initial_queryset()
+        
+        # Debug: Check what IDs exist in the database
+        all_ids = list(base_qs.values_list('id', flat=True).order_by('id'))
+        print(f"DEBUG: All IDs in database: {all_ids}")
+        
+        # Check if the ID exists
+        target_record = base_qs.filter(id=target_id).first()
+        if not target_record:
+            print(f"DEBUG: ID {target_id} not found in database")
+            print(f"DEBUG: Available IDs: {all_ids}")
+            return None
+            
+        # The table is ordered by timestamp descending (newest first), not by ID
+        # So we need to count how many records have timestamps newer than our target
+        records_before = base_qs.filter(start__gt=target_record.start).count()
+        
+        # Get the actual page length from the request or use default
+        page_length = 100  # Default page length
+        if hasattr(self, 'request') and self.request:
+            try:
+                page_length = int(self.request.GET.get('length', 100))
+            except (ValueError, TypeError):
+                pass
+        
+        # Calculate page number
+        page_number = (records_before // page_length) + 1
+        
+        # Debug logging
+        print(f"DEBUG: Looking for ID {target_id}")
+        print(f"DEBUG: Target timestamp: {target_record.start}")
+        print(f"DEBUG: Records with newer timestamps: {records_before}")
+        print(f"DEBUG: Page length: {page_length}")
+        print(f"DEBUG: Calculated page: {page_number}")
+        
+        # Additional verification - let's see what's actually on the calculated page
+        total_records = base_qs.count()
+        print(f"DEBUG: Total records in database: {total_records}")
+        
+        # Let's check what's on the first page by simulating the DataTables query
+        first_page_records = base_qs.order_by('-start')[:page_length]
+        first_page_ids = list(first_page_records.values_list('id', flat=True))
+        print(f"DEBUG: IDs on first page: {first_page_ids}")
+        
+        return page_number
+
+    def get(self, request, *args, **kwargs):
+        """Handle GET requests for DataTables and page lookup."""
+        # Check if this is a page lookup request
+        target_id = request.GET.get('page_for_id')
+        if target_id:
+            # Debug: log what we received
+            print(f"DEBUG: Received page_for_id request for ID: {target_id}")
+            print(f"DEBUG: Request GET params: {dict(request.GET)}")
+            
+            page_number = self.get_page_for_id(target_id)
+            if page_number is not None:
+                return JsonResponse({'page': page_number, 'found': True})
+            else:
+                return JsonResponse({'found': False, 'error': 'ID not found'})
+        
+        # Otherwise, handle as normal DataTables request
+        return super().get(request, *args, **kwargs)
 
 # -- EventStream List
 
@@ -1622,16 +1983,58 @@ class TaskForm(forms.ModelForm):
     end_date = forms.DateTimeField(widget=forms.DateTimeInput(attrs={"type": "date"}))
 
 
-class InitialConfigTask(UserPassesTestMixin, CreateView):
+class InitialConfigTask(LoginRequiredMixin, UserPassesTestMixin, CreateView):
     model = Task
     form_class = TaskForm
     template_name = "initial-config/initial-config-task.html"
 
-    def get_success_url(self):
-        return reverse_lazy('event_tracker:event-list', kwargs={"task_id": Task.objects.last().pk})
-
     def test_func(self):
-        return not self.model.objects.exists()
+        # Test if an operation is active and if it has any tasks.
+        # Allow access only if an operation is active AND it has no tasks yet.
+        if hasattr(self.request, 'current_operation') and self.request.current_operation:
+            # Ensure we are querying the active_op_db for tasks related to this operation
+            # Since tasks are solely in active_op_db, a simple check is enough.
+            return not Task.objects.using('active_op_db').exists()
+        return False # No active operation, or other issue.
+
+    def get_permission_denied_message(self):
+        if not (hasattr(self.request, 'current_operation') and self.request.current_operation):
+            return "No operation is currently active. Please select or create an operation first."
+        if Task.objects.using('active_op_db').exists():
+            return "The current operation already has tasks. You can create new tasks from the operation dashboard or event list."
+        return super().get_permission_denied_message()
+
+    def handle_no_permission(self):
+        # If an operation is active but tasks exist, redirect to event list of first task.
+        if hasattr(self.request, 'current_operation') and self.request.current_operation and Task.objects.using('active_op_db').exists():
+            first_task_pk = Task.objects.using('active_op_db').first().pk
+            messages.info(self.request, "This operation already has tasks. Redirecting to the event list.")
+            return redirect(reverse_lazy('event_tracker:event-list', kwargs={"task_id": first_task_pk}))
+        # If no operation is active, redirect to select operation.
+        if not (hasattr(self.request, 'current_operation') and self.request.current_operation):
+            messages.warning(self.request, "Please select an active operation before creating a task.")
+            return redirect(reverse_lazy('event_tracker:select_operation'))
+        return super().handle_no_permission()
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if hasattr(self.request, 'current_operation') and self.request.current_operation:
+            context['current_operation_display_name'] = self.request.current_operation.display_name
+        else:
+            # This case should ideally be prevented by test_func and handle_no_permission
+            context['current_operation_display_name'] = "None (Error: No active operation!)"
+        context['page_title'] = "Create Initial Task for Operation"
+        return context
+
+    def form_valid(self, form):
+        # Task will be saved to active_op_db due to router configuration
+        self.object = form.save() # Router handles saving to active_op_db
+        messages.success(self.request, f"Initial task '{self.object.name}' created successfully for operation '{self.request.current_operation.display_name}'.")
+        return redirect(self.get_success_url())
+
+    def get_success_url(self):
+        # Redirect to the event list for the newly created task
+        return reverse_lazy('event_tracker:event-list', kwargs={"task_id": self.object.pk})
 
 
 class UserPreferencesForm(forms.ModelForm):
@@ -1640,34 +2043,86 @@ class UserPreferencesForm(forms.ModelForm):
         fields = ['timezone']
 
 
-class InitialConfigAdmin(UserPassesTestMixin, CreateView):
+class InitialConfigAdmin(CreateView): # Temporarily remove UserPassesTestMixin
     model = User
     form_class = UserCreationForm
     template_name = "initial-config/initial-config-admin.html"
 
+    def dispatch(self, request, *args, **kwargs):
+        print(f"[DEBUG] InitialConfigAdmin.dispatch: Path: {request.path}")
+        try:
+            user_count = User.objects.using(DEFAULT_DB_ALIAS).count()
+            print(f"[DEBUG] InitialConfigAdmin.dispatch: User.objects.count() result: {user_count}")
+            if user_count > 0: # If users exist
+                 print(f"[DEBUG] InitialConfigAdmin.dispatch: Users exist ({user_count}), redirecting to login.")
+                 # Simulate UserPassesTestMixin's redirect to login if test_func fails (users exist)
+                 return redirect_to_login(request.get_full_path(), reverse_lazy('login'), self.get_redirect_field_name())
+        except Exception as e:
+            print(f"[DEBUG] InitialConfigAdmin.dispatch: EXCEPTION checking user count: {e}")
+            # If DB error, don't try to redirect, let it proceed to super().dispatch which might show an error page.
+            pass 
+        
+        print(f"[DEBUG] InitialConfigAdmin.dispatch: Proceeding to super().dispatch (user_count should be 0 or exception occurred).")
+        return super().dispatch(request, *args, **kwargs)
+
     def get_success_url(self):
-        return reverse_lazy('event_tracker:event-list', kwargs={"task_id": Task.objects.last().pk})
+        messages.success(self.request, "Initial admin user created successfully. Please create or select an operation.")
+        return reverse_lazy('event_tracker:select_operation')
 
     def get_context_data(self, **kwargs):
-        context = super(InitialConfigAdmin, self).get_context_data(**kwargs)
-        context['preferences_form'] = UserPreferencesForm()
+        print("[DEBUG] InitialConfigAdmin.get_context_data: START")
+        context = super().get_context_data(**kwargs)
+        print(f"[DEBUG] InitialConfigAdmin.get_context_data: Context keys from super: {list(context.keys())}")
+        if 'form' in context:
+            print("[DEBUG] InitialConfigAdmin.get_context_data: 'form' IS in context.")
+            form_instance = context['form']
+            print(f"[DEBUG] InitialConfigAdmin.get_context_data: type(context['form']) = {type(form_instance)}")
+            if hasattr(form_instance, 'is_bound'):
+                print(f"[DEBUG] InitialConfigAdmin.get_context_data: form_instance.is_bound = {form_instance.is_bound}")
+            else:
+                print("[DEBUG] InitialConfigAdmin.get_context_data: form_instance does NOT have 'is_bound' attribute.")
+
+            if hasattr(form_instance, 'fields'):
+                print(f"[DEBUG] InitialConfigAdmin.get_context_data: form_instance.fields keys: {list(form_instance.fields.keys())}")
+                if 'username' in form_instance.fields:
+                    print(f"[DEBUG] InitialConfigAdmin.get_context_data: type(form_instance.fields['username']) = {type(form_instance.fields['username'])}")
+                    # Try rendering the field widget to string
+                    try:
+                        username_field = form_instance['username'] # BoundField
+                        rendered_widget = username_field.as_widget()
+                        print(f"[DEBUG] InitialConfigAdmin.get_context_data: Successfully rendered form_instance['username'].as_widget() to string: {len(rendered_widget)} chars")
+                    except Exception as e:
+                        print(f"[DEBUG] InitialConfigAdmin.get_context_data: EXCEPTION rendering form_instance['username'].as_widget(): {e}")
+                else:
+                    print("[DEBUG] InitialConfigAdmin.get_context_data: 'username' field NOT in form_instance.fields.")
+            else:
+                print("[DEBUG] InitialConfigAdmin.get_context_data: form_instance does NOT have 'fields' attribute.")
+        else:
+            print("[DEBUG] InitialConfigAdmin.get_context_data: 'form' IS NOT in context after super() call.")
+        
+        # The original commented-out lines for UserPreferencesForm
+        # from .forms import UserPreferencesForm # Moved to top if needed, or handle missing form
+        # context['preferences_form'] = UserPreferencesForm()
+        print("[DEBUG] InitialConfigAdmin.get_context_data: END (original print was: InitialConfigAdmin.get_context_data called.)")
         return context
 
     def form_valid(self, form):
-        result = super(InitialConfigAdmin, self).form_valid(form)
-        # Give the new user admin rights
+        print("[DEBUG] InitialConfigAdmin.form_valid called.")
+        result = super().form_valid(form)
         self.object.is_staff = True
         self.object.is_superuser = True
-        self.object.save()
-        # Process the timezone form and attach to the new user
-        preferences = UserPreferencesForm(self.request.POST).save(commit=False)
-        preferences.user = self.object
-        preferences.save()
-        # Go to the success_url() result
+        self.object.save(using=DEFAULT_DB_ALIAS)
+        
+        # Assuming UserPreferencesForm is available
+        # from .forms import UserPreferencesForm 
+        # preferences_form = UserPreferencesForm(self.request.POST)
+        # if preferences_form.is_valid():
+        #     preferences = preferences_form.save(commit=False)
+        #     preferences.user = self.object
+        #     preferences.save(using=DEFAULT_DB_ALIAS)
         return result
 
-    def test_func(self):
-        return not self.model.objects.exists()
+    # test_func is removed as UserPassesTestMixin is removed for this debug step
 
 
 class UserPreferencesView(LoginRequiredMixin, FormView):
@@ -1730,3 +2185,418 @@ class EventFieldSuggestions(View):
         context["description_suggestions"], context["mitre_suggestions"] = generate_suggestions(event_form)
 
         return render(request, "suggestions/event_field_suggestions.html", context)
+
+# Operation Management Views
+
+class SelectOperationView(LoginRequiredMixin, ListView):
+    model = Operation
+    template_name = 'event_tracker/operation_select.html' # Create this template
+    context_object_name = 'operations'
+
+    def get_queryset(self):
+        # Operations are stored in the default database
+        return Operation.objects.using(DEFAULT_DB_ALIAS).order_by('display_name')
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['current_op_name'] = self.request.session.get('active_operation_name')
+        return context
+
+class CreateOperationView(LoginRequiredMixin, CreateView):
+    model = Operation
+    form_class = OperationForm
+    template_name = 'event_tracker/operation_form.html' # Create this template
+    # success_url = reverse_lazy('event_tracker:select_operation') # Or activate directly
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        # Ensure form saves to the default database
+        kwargs['instance'] = Operation(pk=None) # Pass an unsaved instance for ModelForm to know it's a create
+        return kwargs
+
+    def form_valid(self, form):
+        # Ensure the operation is saved to the default database explicitly
+        # The router should handle this, but being explicit can be safer with ModelForms.
+        form.instance.save(using=DEFAULT_DB_ALIAS)
+        messages.success(self.request, f"Operation '{form.instance.display_name}' created successfully. Please create an initial task.")
+        
+        # Instead of just activating in session here, redirect to the activate_operation view,
+        # which handles full activation, DB initialization, and then redirects to initial-config-task.
+        return redirect(reverse('event_tracker:activate_operation', kwargs={'operation_name': form.instance.name}))
+
+from .middleware import _initialize_operation_db # <<< ENSURE THIS IMPORT IS HERE
+
+@transaction.non_atomic_requests
+@login_required
+def activate_operation(request, operation_name):
+    logger.info(f"[ACTIVATE_OP] Entered activate_operation for '{operation_name}'")
+    
+    # First, ensure we're not in any atomic transactions
+    try:
+        # Close any existing connections to ensure clean state
+        if 'active_op_db' in connections:
+            connections['active_op_db'].close()
+            connections['active_op_db'].connection = None
+            logger.info("[ACTIVATE_OP] Closed existing active_op_db connection")
+        
+        # Ensure atomic transactions are disabled for both databases
+        connections.databases['default']['ATOMIC_REQUESTS'] = False
+        connections.databases['active_op_db'] = {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': str(settings.OPS_DATA_DIR / f"{operation_name}.sqlite3"),
+            'OPTIONS': {'timeout': 20},
+            'ATOMIC_REQUESTS': False,
+            'CONN_MAX_AGE': 0,
+            'AUTOCOMMIT': True,
+        }
+        logger.info("[ACTIVATE_OP] Disabled atomic transactions for both databases")
+    except Exception as e:
+        logger.error(f"[ACTIVATE_OP] Error setting up database connections: {e}")
+        messages.error(request, f"Error setting up database connections: {e}")
+        return redirect('event_tracker:select_operation')
+
+    try:
+        operation = Operation.objects.using(DEFAULT_DB_ALIAS).get(name=operation_name)
+        logger.info(f"[ACTIVATE_OP] Found operation '{operation.name}' in default database")
+    except Operation.DoesNotExist:
+        logger.error(f"[ACTIVATE_OP] Operation '{operation_name}' not found in default DB")
+        messages.error(request, f"Operation '{operation_name}' not found.")
+        return redirect('event_tracker:select_operation')
+
+    try:
+        CurrentOperation.objects.using('default').all().delete()
+        logger.info("[ACTIVATE_OP] Cleared existing CurrentOperation entries")
+    except Exception as e:
+        logger.error(f"[ACTIVATE_OP] Error clearing CurrentOperation entries: {e}")
+
+    # Initialize database with polling
+    max_attempts = 5
+    attempt = 0
+    initialized = False
+    last_error = None
+
+    while attempt < max_attempts and not initialized:
+        try:
+            logger.info(f"[ACTIVATE_OP] Attempt {attempt + 1}/{max_attempts} to initialize database for '{operation.name}'")
+            
+            # Ensure we're not in an atomic transaction before each attempt
+            if 'active_op_db' in connections:
+                connections['active_op_db'].close()
+                connections['active_op_db'].connection = None
+            
+            initialized, message = _initialize_operation_db(operation.name, settings.OPS_DATA_DIR)
+            logger.info(f"[ACTIVATE_OP] _initialize_operation_db returned: initialized={initialized}, message={message}")
+            
+            if initialized:
+                logger.info(f"[ACTIVATE_OP] Database initialized successfully for operation '{operation.name}'")
+                break
+            else:
+                last_error = message
+                logger.warning(f"[ACTIVATE_OP] Database initialization attempt {attempt + 1} failed: {message}")
+                time.sleep(2)  # Wait 2 seconds before next attempt
+                
+        except Exception as e:
+            last_error = str(e)
+            logger.error(f"[ACTIVATE_OP] Error during initialization attempt {attempt + 1}: {e}")
+            time.sleep(2)  # Wait 2 seconds before next attempt
+            
+        attempt += 1
+
+    if not initialized:
+        error_msg = f"Could not initialize database after {max_attempts} attempts. Last error: {last_error}"
+        logger.error(f"[ACTIVATE_OP] {error_msg}")
+        messages.error(request, f"Could not initialize database for operation '{operation.display_name}'. {error_msg}")
+        request.session.pop('active_operation_name', None)
+        request.session.pop('active_operation_display_name', None)
+        try:
+            CurrentOperation.objects.using('default').all().delete()
+        except Exception as delete_error:
+            logger.error(f"[ACTIVATE_OP] Error clearing CurrentOperation model: {delete_error}")
+        return redirect('event_tracker:select_operation')
+
+    try:
+        # Create CurrentOperation entry
+        CurrentOperation.objects.using('default').create(operation=operation)
+        logger.info(f"[ACTIVATE_OP] Created new CurrentOperation entry for '{operation.name}'")
+
+        # Set session variables
+        request.session['active_operation_name'] = operation.name
+        request.session['active_operation_display_name'] = operation.display_name
+        logger.info(f"[ACTIVATE_OP] User '{request.user}' activated operation '{operation.name}' ('{operation.display_name}')")
+
+        # Start team server pollers if needed
+        from cobalt_strike_monitor.models import TeamServer
+        from cobalt_strike_monitor.poll_team_server import TeamServerPoller
+        enabled_servers = list(TeamServer.objects.using('active_op_db').filter(active=True))
+        logger.info(f"[ACTIVATE_OP] Found {len(enabled_servers)} enabled teamservers in operation '{operation.name}'")
+        if enabled_servers:
+            logger.info(f"[ACTIVATE_OP] Starting pollers for {len(enabled_servers)} teamservers")
+            poller = TeamServerPoller()
+            for server in enabled_servers:
+                poller.add(server.pk)
+                logger.info(f"[ACTIVATE_OP] Started poller for teamserver {server.pk}")
+        else:
+            logger.info(f"[ACTIVATE_OP] No enabled teamservers found for operation '{operation.name}'")
+
+        # Re-enable atomic requests for active_op_db
+        connections.databases['active_op_db']['ATOMIC_REQUESTS'] = True
+        if 'active_op_db' in connections:
+            connections['active_op_db'].close()
+            logger.info(f"[ACTIVATE_OP] Closed active_op_db connection after re-enabling ATOMIC_REQUESTS")
+
+    except Exception as e:
+        logger.error(f"[ACTIVATE_OP] Unexpected error after database initialization for operation '{operation.name}': {e}", exc_info=True)
+        messages.error(request, f"Error activating operation '{operation.display_name}'. Error: {e}")
+        request.session.pop('active_operation_name', None)
+        request.session.pop('active_operation_display_name', None)
+        try:
+            CurrentOperation.objects.using('default').all().delete()
+        except Exception as delete_error:
+            logger.error(f"[ACTIVATE_OP] Error clearing CurrentOperation model: {delete_error}")
+        return redirect('event_tracker:select_operation')
+
+    messages.success(request, f"Activated operation: {operation.display_name}")
+
+    next_url = request.GET.get('next')
+    if next_url and url_has_allowed_host_and_scheme(url=next_url, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
+        logger.debug(f"[ACTIVATE_OP] Operation '{operation.name}' activated. Redirecting to safe next_url: {next_url}")
+        return redirect(next_url)
+    else:
+        if next_url:
+            logger.warning(f"[ACTIVATE_OP] Operation '{operation.name}' activated. Unsafe next_url provided: '{next_url}'. Falling back to default redirect.")
+        if not Task.objects.using('active_op_db').exists():
+            logger.debug(f"[ACTIVATE_OP] Operation '{operation.name}' activated. No tasks found. Redirecting to initial task config.")
+            return redirect('event_tracker:initial-config-task')
+        else:
+            first_task = Task.objects.using('active_op_db').order_by('id').first()
+            logger.debug(f"[ACTIVATE_OP] Operation '{operation.name}' activated. Tasks exist. Redirecting to first task events: {first_task.id}")
+            return redirect(reverse('event_tracker:event-list', kwargs={'task_id': first_task.id}))
+
+
+class InitialConfigTask(LoginRequiredMixin, UserPassesTestMixin, CreateView):
+    model = Task
+    form_class = TaskForm
+    template_name = "initial-config/initial-config-task.html"
+
+    def test_func(self):
+        # Test if an operation is active and if it has any tasks.
+        # Allow access only if an operation is active AND it has no tasks yet.
+        if hasattr(self.request, 'current_operation') and self.request.current_operation:
+            # Ensure we are querying the active_op_db for tasks related to this operation
+            # Since tasks are solely in active_op_db, a simple check is enough.
+            return not Task.objects.using('active_op_db').exists()
+        return False # No active operation, or other issue.
+
+    def get_permission_denied_message(self):
+        if not (hasattr(self.request, 'current_operation') and self.request.current_operation):
+            return "No operation is currently active. Please select or create an operation first."
+        if Task.objects.using('active_op_db').exists():
+            return "The current operation already has tasks. You can create new tasks from the operation dashboard or event list."
+        return super().get_permission_denied_message()
+
+    def handle_no_permission(self):
+        # If an operation is active but tasks exist, redirect to event list of first task.
+        if hasattr(self.request, 'current_operation') and self.request.current_operation and Task.objects.using('active_op_db').exists():
+            first_task_pk = Task.objects.using('active_op_db').first().pk
+            messages.info(self.request, "This operation already has tasks. Redirecting to the event list.")
+            return redirect(reverse_lazy('event_tracker:event-list', kwargs={"task_id": first_task_pk}))
+        # If no operation is active, redirect to select operation.
+        if not (hasattr(self.request, 'current_operation') and self.request.current_operation):
+            messages.warning(self.request, "Please select an active operation before creating a task.")
+            return redirect(reverse_lazy('event_tracker:select_operation'))
+        return super().handle_no_permission()
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if hasattr(self.request, 'current_operation') and self.request.current_operation:
+            context['current_operation_display_name'] = self.request.current_operation.display_name
+        else:
+            # This case should ideally be prevented by test_func and handle_no_permission
+            context['current_operation_display_name'] = "None (Error: No active operation!)"
+        context['page_title'] = "Create Initial Task for Operation"
+        return context
+
+    def form_valid(self, form):
+        # Task will be saved to active_op_db due to router configuration
+        self.object = form.save() # Router handles saving to active_op_db
+        messages.success(self.request, f"Initial task '{self.object.name}' created successfully for operation '{self.request.current_operation.display_name}'.")
+        return redirect(self.get_success_url())
+
+    def get_success_url(self):
+        # Redirect to the event list for the newly created task
+        return reverse_lazy('event_tracker:event-list', kwargs={"task_id": self.object.pk})
+
+class ImportOperationView(LoginRequiredMixin, CreateView):
+    form_class = ImportOperationForm
+    template_name = 'event_tracker/operation_import.html'
+    success_url = reverse_lazy('event_tracker:select_operation')
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        # Remove instance from kwargs since ImportOperationForm is not a ModelForm
+        kwargs.pop('instance', None)
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            # Create the operation in the default database
+            operation = Operation.objects.create(
+                name=form.cleaned_data['name'],
+                display_name=form.cleaned_data['display_name']
+            )
+
+            # Get the uploaded file
+            db_file = form.cleaned_data['db_file']
+            
+            # Save the database file to the ops-data directory
+            import shutil
+            import os
+            from django.conf import settings
+            from django.core.management import call_command
+            from io import StringIO
+            
+            # Ensure the ops-data directory exists
+            os.makedirs(settings.OPS_DATA_DIR, exist_ok=True)
+            
+            # Save the file
+            destination_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+            with open(destination_path, 'wb+') as destination:
+                for chunk in db_file.chunks():
+                    destination.write(chunk)
+
+            # Update the active_op_db settings to point to the new database
+            connections['active_op_db'].close()
+            connections.databases['active_op_db']['NAME'] = str(destination_path)
+            connections['active_op_db'].connection = None
+
+            # Run migrations on the imported database
+            core_apps = [
+                'contenttypes',
+                'auth',
+                'admin',
+                'sessions',
+            ]
+
+            our_apps = [
+                'event_tracker',
+                'cobalt_strike_monitor',
+                'taggit',
+                'djangoplugins',
+                'reversion',
+                'background_task'
+            ]
+
+            # Run migrations for core apps first
+            for app_name in core_apps:
+                migration_output_buffer = StringIO()
+                try:
+                    call_command(
+                        'migrate',
+                        app_name,
+                        database='active_op_db',
+                        verbosity=1,
+                        stdout=migration_output_buffer,
+                        stderr=migration_output_buffer
+                    )
+                except Exception as e:
+                    messages.error(self.request, f"Error running migrations for {app_name}: {str(e)}")
+                    return self.form_invalid(form)
+
+            # Then run migrations for our apps
+            for app_name in our_apps:
+                migration_output_buffer = StringIO()
+                try:
+                    call_command(
+                        'migrate',
+                        app_name,
+                        database='active_op_db',
+                        verbosity=1,
+                        stdout=migration_output_buffer,
+                        stderr=migration_output_buffer
+                    )
+                except Exception as e:
+                    messages.error(self.request, f"Error running migrations for {app_name}: {str(e)}")
+                    return self.form_invalid(form)
+
+            # Sync users from default database to operation database
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            
+            # Get all users from default database
+            default_users = User.objects.using('default').all()
+            
+            # Copy each user to the operation database
+            for user in default_users:
+                new_user = User(
+                    id=user.id,
+                    username=user.username,
+                    password=user.password,
+                    is_superuser=user.is_superuser,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    email=user.email,
+                    is_staff=user.is_staff,
+                    is_active=user.is_active,
+                    date_joined=user.date_joined
+                )
+                new_user.save(using='active_op_db')
+
+            messages.success(self.request, f"Operation '{operation.display_name}' imported successfully.")
+            return super().form_valid(form)
+        except Exception as e:
+            messages.error(self.request, f"Error importing operation: {str(e)}")
+            return self.form_invalid(form)
+
+class UpdateOperationView(LoginRequiredMixin, UpdateView):
+    model = Operation
+    form_class = OperationForm
+    template_name = 'event_tracker/operation_form.html'
+    slug_field = 'name'
+    slug_url_kwarg = 'operation_name'
+
+    def get_queryset(self):
+        return Operation.objects.using(DEFAULT_DB_ALIAS)
+
+    def form_valid(self, form):
+        old_name = self.get_object().name
+        new_name = form.cleaned_data['name']
+        form.instance.save(using=DEFAULT_DB_ALIAS)
+        if old_name != new_name:
+            old_db_path = settings.OPS_DATA_DIR / f"{old_name}.sqlite3"
+            new_db_path = settings.OPS_DATA_DIR / f"{new_name}.sqlite3"
+            if old_db_path.exists():
+                try:
+                    old_db_path.rename(new_db_path)
+                except Exception as e:
+                    messages.warning(self.request, f"Could not rename database file: {e}")
+            else:
+                messages.warning(self.request, f"Old database file {old_db_path} not found for renaming.")
+        messages.success(self.request, f"Operation '{form.instance.display_name}' updated successfully.")
+        return redirect('event_tracker:select_operation')
+
+class DeleteOperationView(LoginRequiredMixin, DeleteView):
+    model = Operation
+    template_name = 'event_tracker/operation_confirm_delete.html'
+    slug_field = 'name'
+    slug_url_kwarg = 'operation_name'
+
+    def get_queryset(self):
+        return Operation.objects.using(DEFAULT_DB_ALIAS)
+
+    def delete(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        db_path = settings.OPS_DATA_DIR / f"{self.object.name}.sqlite3"
+        # Capture db_path before deletion
+        response = super().delete(request, *args, **kwargs)
+        if db_path.exists():
+            try:
+                db_path.unlink()
+            except Exception as e:
+                messages.warning(request, f"Could not delete database file: {e}")
+        else:
+            messages.warning(request, f"Database file {db_path} not found for deletion.")
+        messages.success(request, f"Operation '{self.object.display_name}' and its database file have been deleted.")
+        return response
+
+    def get_success_url(self):
+        return reverse_lazy('event_tracker:select_operation')

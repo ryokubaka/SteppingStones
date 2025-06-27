@@ -8,6 +8,10 @@ from background_task import background
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from neo4j import GraphDatabase, Driver
+from django.contrib.auth import get_user_model
+from django.db import connections
+from django.core.management import call_command
+from django.conf import settings
 
 import cobalt_strike_monitor.models
 from cobalt_strike_monitor.models import Listener, Beacon, BeaconLog
@@ -16,6 +20,10 @@ from event_tracker.cred_extractor.extractor import extract_and_save
 from event_tracker.models import Context, Credential, File, HashCatMode, Webhook
 from event_tracker.utils import split_path
 
+# Configure logger
+logger = logging.getLogger(__name__)
+
+User = get_user_model()
 
 @receiver(post_save, sender=Listener)
 def cs_listener_to_context(sender, instance: Listener, **kwargs):
@@ -201,3 +209,72 @@ def custom_resolver(socket_address):
         yield neo4j.Address(("127.0.0.1", socket_address[1]))
     else:
         yield neo4j.Address.parse(format(socket_address))
+
+
+@receiver(post_save, sender=User)
+def sync_user_to_operation_db(sender, instance, created, **kwargs):
+    """
+    Signal handler to sync user changes to all operation databases.
+    This ensures that any user created or modified in the default database
+    is also reflected in all operation databases.
+    """
+    try:
+        # Get all operation databases
+        ops_data_dir = settings.OPS_DATA_DIR
+        if not ops_data_dir.exists():
+            return
+
+        # Get all .sqlite3 files in the ops-data directory
+        op_dbs = list(ops_data_dir.glob('*.sqlite3'))
+        logger.info(f"Found {len(op_dbs)} operation databases to sync users to")
+
+        for db_path in op_dbs:
+            try:
+                # Update the active_op_db settings for this database
+                connections['active_op_db'].close()
+                connections.databases['active_op_db']['NAME'] = str(db_path)
+                connections['active_op_db'].connection = None
+
+                # Check if the user exists in this operation database
+                with connections['active_op_db'].cursor() as cursor:
+                    cursor.execute("SELECT id FROM auth_user WHERE id = %s", [instance.id])
+                    exists = cursor.fetchone() is not None
+
+                if exists:
+                    # Update existing user
+                    with connections['active_op_db'].cursor() as cursor:
+                        cursor.execute("""
+                            UPDATE auth_user 
+                            SET username = %s, password = %s, is_superuser = %s,
+                                first_name = %s, last_name = %s, email = %s,
+                                is_staff = %s, is_active = %s, date_joined = %s
+                            WHERE id = %s
+                        """, [
+                            instance.username, instance.password, instance.is_superuser,
+                            instance.first_name, instance.last_name, instance.email,
+                            instance.is_staff, instance.is_active, instance.date_joined,
+                            instance.id
+                        ])
+                        logger.info(f"Updated user {instance.username} in operation database {db_path}")
+                else:
+                    # Insert new user
+                    with connections['active_op_db'].cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO auth_user (id, username, password, is_superuser,
+                                                first_name, last_name, email, is_staff,
+                                                is_active, date_joined)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, [
+                            instance.id, instance.username, instance.password,
+                            instance.is_superuser, instance.first_name, instance.last_name,
+                            instance.email, instance.is_staff, instance.is_active,
+                            instance.date_joined
+                        ])
+                        logger.info(f"Inserted user {instance.username} into operation database {db_path}")
+
+            except Exception as e:
+                logger.error(f"Error syncing user to operation database {db_path}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in sync_user_to_operation_db: {e}")
+        # Don't prevent the user from being saved in the default database

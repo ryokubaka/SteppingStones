@@ -21,15 +21,7 @@ Event List
     <link rel="stylesheet" href="{% static "css/event_table.css"%}">
     <script src="{% static "scripts/event_table.js" %}"></script>
     <script nonce="{{request.csp_nonce}}">
-    let eventTableConfig = {
-        monospaceFontURL: '{{request.scheme}}://{{request.META.HTTP_HOST}}{% static "fonts/RobotoMono-Regular.ttf" %}',
-        brandingSVG: '{{REPORT_FOOTER_IMAGE}}',
-        brandingText: '{{REPORT_FOOTER_TEXT}}',
-        totalColumns: 7,
-        descriptionColumn: 3,
-        columnWidths: ['auto', 75, 75, 350, 40, 40, 'auto'],
-        columnHeadings: [null, null, null, null, "Detect", "Prevent", null],
-    }
+    var emptyTableString = "{% if perms.event_tracker.add_event %}<i class='fa fa-exclamation-triangle' aria-hidden='true'></i> No events found. Either <i class='fa-solid fa-arrow-turn-up fa-flip-horizontal'></i> <b>add a new event</b> or <b>clear the filter</b> <i class='fa-solid fa-arrow-turn-up'></i>.{% else %}<i class='fa fa-exclamation-triangle' aria-hidden='true'></i> No events found. You may need to <b>clear the filter</b> <i class='fa-solid fa-arrow-turn-up'></i>.{% endif %}";
     </script>
     
     <style nonce="{{request.csp_nonce}}">
@@ -234,6 +226,18 @@ Event List
           </div>
         </div>
     </div>
+    <!-- Logs per page dropdown at the bottom, centered -->
+    <div class="row mt-3">
+      <div class="col-md-12 d-flex justify-content-center">
+        <label for="record-limit" class="me-2 mb-0">Logs per page:</label>
+        <select class="form-select form-select-sm w-auto" id="record-limit">
+          <option value="10">10 records</option>
+          <option value="25">25 records</option>
+          <option value="50">50 records</option>
+          <option value="100">100 records</option>
+        </select>
+      </div>
+    </div>
 </div>
 
 {% if perms.event_tracker.delete_event %}
@@ -307,12 +311,26 @@ if ($('.fa-star.fa-solid').length <= 1)  // 1 star for the filter icon itself
 {% endif %}
 
 <script nonce="{{request.csp_nonce}}">
+let eventTableConfig = {
+    monospaceFontURL: '{{request.scheme}}://{{request.META.HTTP_HOST}}{% static "fonts/RobotoMono-Regular.ttf" %}',
+    brandingSVG: '{{REPORT_FOOTER_IMAGE}}',
+    brandingText: '{{REPORT_FOOTER_TEXT}}',
+    totalColumns: 7,
+    descriptionColumn: 3,
+    columnWidths: ['auto', 75, 75, 350, 40, 40, 'auto'],
+    columnHeadings: [null, null, null, null, "Detect", "Prevent", null],
+}
+</script>
+
+<script nonce="{{request.csp_nonce}}">
 $(function () {
     $('[data-toggle="tooltip"]').tooltip();
     $.fn.dataTable.moment('{% datetime_format_moment %}');
     $('.table').DataTable({
         searching: true,
-        paging: false,
+        paging: true,
+        pageLength: 10,
+        lengthChange: false,
         buttons: [
             {
                 extend: 'searchBuilder',
@@ -342,13 +360,7 @@ $(function () {
                 _: 'events',
                 1: 'event'
             },
-            emptyTable: "<i class='fa fa-exclamation-triangle' aria-hidden='true'></i> No events found. " +
-                        {% if perms.event_tracker.add_event %}
-                            "Either <i class='fa-solid fa-arrow-turn-up fa-flip-horizontal'></i> <b>add a new event</b> or " +
-                        {% else %}
-                            "You may need to " +
-                        {% endif %}
-                        "<b>clear the filter</b> <i class='fa-solid fa-arrow-turn-up'></i>."
+            emptyTable: emptyTableString
         },
         layout: {
             topStart: {
@@ -393,6 +405,19 @@ $(function () {
     })
 
     $('#pdf-export').on('click', function() {$('.table').DataTable().buttons('.buttons-pdf').trigger()})
+});
+</script>
+
+<script nonce="{{request.csp_nonce}}">
+$(document).ready(function() {
+    // Set default to 10 records
+    $('#record-limit').val('10');
+    // Handle record limit changes
+    $('#record-limit').on('change', function() {
+        var limit = $(this).val();
+        // Use the DataTable instance for the main table
+        $('table.table').DataTable().page.len(limit).draw();
+    });
 });
 </script>
 

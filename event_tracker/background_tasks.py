@@ -10,8 +10,17 @@ from django.db.models import Q, Count, Value
 from django.db.models.functions import Substr, Upper, Concat
 from neo4j.exceptions import ClientError
 
-from event_tracker.models import BloodhoundServer, Credential, HashCatMode, Event, Context
+from event_tracker.models import BloodhoundServer, Credential, HashCatMode, Event, Context, CurrentOperation
 from event_tracker.signals import get_driver_for
+
+import logging
+from django.db import connections
+from django.utils import timezone
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.db.utils import OperationalError
+
+logger = logging.getLogger(__name__)
 
 
 def _count_disabled_accounts(tx):
@@ -132,21 +141,21 @@ def sync_bh_owned():
     bh_servers = BloodhoundServer.objects.filter(active=True).all()
 
     # Mark source host as owned if we are running things in a system context
-    source_hosts = (Context.objects.filter(id__in=Event.objects.all().values_list("source", flat=True))
+    source_hosts = (Context.objects.using('default').filter(id__in=Event.objects.using('default').all().values_list("source", flat=True))
                     .filter(user__iexact="system").values_list('host', flat=True))
     for bloodhound_server in bh_servers:
         for source_hosts_page in Paginator(source_hosts, 1000):
             update_owned_hosts(bloodhound_server, list(source_hosts_page.object_list))
 
     # Mark source user as owned if we are running things in that user's context
-    source_users = (Context.objects.filter(id__in=Event.objects.all().values_list("source", flat=True))
+    source_users = (Context.objects.using('default').filter(id__in=Event.objects.using('default').all().values_list("source", flat=True))
                     .exclude(user__iexact="system").values_list('user', flat=True))
     for bloodhound_server in bh_servers:
         for source_users_page in Paginator(source_users, 1000):
             update_owned_users(bloodhound_server, list(source_users_page.object_list))
 
     # Only mark as owned if we have a plain-text secret in the credential, not just a hash
-    credentials = Credential.objects.filter(secret__isnull=False).order_by('account').distinct()\
+    credentials = Credential.objects.using('default').filter(secret__isnull=False).order_by('account').distinct()\
         .annotate(bhname=Upper(Concat('account', Value('@'), 'system'))).values_list('bhname', flat=True)
     for bloodhound_server in bh_servers:
         for credentials_page in Paginator(credentials, 1000):
@@ -226,4 +235,16 @@ def set_owned_bloodhound_users_without_domain(tx, users):
         match (n) where (n:User or n:AZUser) and toLower(split(n.name, "@")[0]) = toLower(ownedUser) and n.owned=False 
         set n.owned=True, n.notes="Marked as Owned by Stepping Stones at {datetime.now():%Y-%m-%d %H:%M:%S%z}"''',
         users=users)
+
+
+def get_current_active_operation():
+    """Get the current active operation, first from the CurrentOperation model."""
+    # First try to get it from the CurrentOperation model
+    current_op = CurrentOperation.get_current()
+    if current_op:
+        logger.info(f"Found active operation '{current_op.name}' from CurrentOperation model")
+        return current_op
+    
+    logger.warning("No active operation found.")
+    return None
 

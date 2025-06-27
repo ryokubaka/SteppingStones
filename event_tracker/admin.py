@@ -7,9 +7,10 @@ from reversion.admin import VersionAdmin
 from taggit.admin import TagAdmin
 from taggit.models import Tag
 from taggit_bulk.actions import tag_wizard
+from django.utils.translation import gettext_lazy as _
 
 from .models import Task, Context, Event, AttackTactic, AttackTechnique, AttackSubTechnique, File, FileDistribution, \
-    UserPreferences, Credential, Webhook
+    UserPreferences, Credential, Webhook, LDAPSettings
 
 # Register your models here.
 
@@ -104,3 +105,34 @@ class WebhookResource(resources.ModelResource):
 class WebhookAdmin(ImportExportModelAdmin):
     resource_classes = [WebhookResource]
     list_display = ["url"]
+
+
+@admin.register(LDAPSettings)
+class LDAPSettingsAdmin(admin.ModelAdmin):
+    fieldsets = (
+        (_('Basic Settings'), {
+            'fields': ('enabled', 'server_uri', 'bind_dn', 'bind_password')
+        }),
+        (_('User Search'), {
+            'fields': ('user_search_base', 'user_search_filter', 'user_attr_map')
+        }),
+        (_('Group Settings'), {
+            'fields': ('group_search_base', 'group_search_filter', 'require_group', 'deny_group', 'user_flags_by_group')
+        }),
+        (_('Cache Settings'), {
+            'fields': ('cache_timeout',)
+        }),
+        (_('TLS/Connection Options'), {
+            'fields': ('tls_require_cert', 'tls_demand', 'tls_cacertfile')
+        }),
+    )
+
+    def has_add_permission(self, request):
+        # Only allow one LDAP settings instance
+        if self.model.objects.exists():
+            return False
+        return super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        # Prevent deletion of LDAP settings
+        return False

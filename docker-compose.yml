@@ -1,31 +1,28 @@
-version: '3.8'
+version: '3.3'
 
 services:
-  web:
+  app:
     build: .
     image: stepping_stones
-    container_name: web
-    ports:
-      - "8000:8000"
+    container_name: app
     volumes:
       - ./:/opt/steppingstones
       - /opt/cobaltstrike:/opt/cobaltstrike
-    restart: always
+    expose:
+      - "8000"
     environment:
       DJANGO_DEBUG: "FALSE"
       DJANGO_SECRET_KEY: "dev-secret-key"
       DJANGO_ALLOWED_HOSTS: "*"
     command: >
       sh -c "
-        # Ensure background_task migrations exist
         python manage.py makemigrations background_task &&
-        # Apply migrations so the DB is fully ready
         python manage.py migrate &&
-        # Then launch the dev server
+        python manage.py migrate_all_ops &&
         python manage.py runserver 0.0.0.0:8000 --insecure
       "
+    restart: always
 
-  #Tasks container only runs process_tasks
   tasks:
     image: stepping_stones
     container_name: tasks
@@ -33,11 +30,9 @@ services:
       - ./:/opt/steppingstones
       - /opt/cobaltstrike:/opt/cobaltstrike
     depends_on:
-      - web
-    restart: unless-stopped
+      - app
     command: |
       sh -c "
-        # Delete the cobaltstrike poller tasks so they are regenerated upon starting based on active teamservers
         if [ -f db.sqlite3 ]; then
             python manage.py shell -c \"from background_task.models import Task; Task.objects.filter(task_name='cobalt_strike_monitor.poll_team_server.poll_teamserver').delete()\"
         else
@@ -45,7 +40,20 @@ services:
         fi
         python manage.py process_tasks
       "
+    restart: always
 
+  web:
+    image: nginx:latest
+    container_name: web
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs/:/etc/nginx/certs/:ro
+    depends_on:
+      - app
+    restart: always
+    
 volumes:
   sqlite_data:
     driver: local

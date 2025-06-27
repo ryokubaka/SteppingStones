@@ -12,7 +12,7 @@ from .views import EventCreateView, EventUpdateView, EventDeleteView, EventListV
     UserListAutocomplete, HostListAutocomplete, ProcessListAutocomplete, InitialConfigTask, InitialConfigAdmin, \
     toggle_event_star, EventTagAutocomplete, TeamServerConfigView, EventStreamListView, EventStreamListJSON, EventStreamUpload, \
     EventStreamToEventView, toggle_qs_stars, LimitedEventUpdateView, EventBulkEdit, \
-    TeamServerHealthCheckView, EventFieldSuggestions, UserPreferencesView
+    TeamServerHealthCheckView, EventFieldSuggestions, UserPreferencesView, GlobalSearchView, GlobalSearchJSONView
 from .views_bloodhound import BloodhoundServerListView, BloodhoundServerCreateView, BloodhoundServerUpdateView, \
     BloodhoundServerDeleteView
 from .views_credentials import CredentialListView, CredentialListJson, CredentialCreateView, CredentialUpdateView, \
@@ -89,6 +89,8 @@ urlpatterns = [
     path('cs-beacon-timeline', CSBeaconsTimelineView.as_view(), name='cs-beacon-timeline'),
     path('cs-beaconwatch-add/<int:beacon_id>', beaconwatch_add, name='cs-beaconwatch-add'),
     path('cs-beaconwatch-remove/<int:beacon_id>', beaconwatch_remove, name='cs-beaconwatch-remove'),
+    path('cs-global-search', GlobalSearchView.as_view(), name='cs-global-search'),
+    path('cs-global-search-api', GlobalSearchJSONView.as_view(), name='cs-global-search-json'),
 
     path('eventstream', EventStreamListView.as_view(), name='eventstream-list'),
     path('eventstream-api', EventStreamListJSON.as_view(), name='eventstream-json'),
@@ -113,6 +115,7 @@ urlpatterns = [
     path('bloodhound-server/toggle-high-value/<str:dn>',
          event_tracker.views_bloodhound.toggle_bloodhound_node_highvalue, name='bloodhound-node-toggle-highvalue'),
     path('bloodhound-server/ou-api', event_tracker.views_bloodhound.BloodhoundServerOUAPI.as_view(), name='bloodhound-ou-api'),
+    path('bloodhound-server/ou-search', event_tracker.views_bloodhound.BloodhoundServerOUSearchAPI.as_view(), name='bloodhound-ou-search'),
 
     path('host-list-autocomplete/', HostListAutocomplete.as_view(), name='host-list-autocomplete'),
     path('user-list-autocomplete/', UserListAutocomplete.as_view(), name='user-list-autocomplete'),
@@ -123,4 +126,15 @@ urlpatterns = [
     path('initial-config/task', InitialConfigTask.as_view(), name='initial-config-task'),
     path('initial-config/admin', InitialConfigAdmin.as_view(), name='initial-config-admin'),
     path('user-config/preferences', UserPreferencesView.as_view(), name='user-preferences'),
+
+    # Tag autocomplete for django-tomselect
+    path('tag-autocomplete/', views.TagAutocomplete.as_view(), name='tag-autocomplete'),
+
+    # Operation Management URLs
+    path('operations/select/', views.SelectOperationView.as_view(), name='select_operation'),
+    path('operations/create/', views.CreateOperationView.as_view(), name='create_operation'),
+    path('operations/import/', views.ImportOperationView.as_view(), name='import_operation'),
+    path('operations/<str:operation_name>/activate/', views.activate_operation, name='activate_operation'),
+    path('operations/<str:operation_name>/edit/', views.UpdateOperationView.as_view(), name='edit_operation'),
+    path('operations/<str:operation_name>/delete/', views.DeleteOperationView.as_view(), name='delete_operation'),
 ]

@@ -32,6 +32,64 @@ Stepping Stones is a Python Django application, so to get a local copy running:
   so pick a suitable username, e.g. "ST", or "stephen", rather than "admin". If using the Cobalt Strike integration, 
   using the same usernames for both tools will aid integration.
 
+---
+
+## Docker Compose & HTTPS Setup
+
+This project supports a production-style deployment using Docker Compose, Nginx, and HTTPS.
+
+1. **Place your SSL certificate and key in `certs/`:**
+   - Example:  
+     - `certs/steppingstones.cer`
+     - `certs/steppingstones.key`
+
+2. **Build and start the stack:**
+   ```sh
+   docker-compose build
+   docker-compose up -d
+   ```
+
+3. **Access the app:**
+   - Visit: `https://<your-docker-host>/`
+
+4. **Service Overview:**
+   - `app`: Runs Django
+   - `tasks`: Runs background tasks and management commands
+   - `web`: Runs Nginx, terminates SSL, and proxies to `app`
+
+5. **Nginx Configuration:**
+   - Nginx is configured via `nginx.conf` to use your cert and key, and proxy all requests to the `app` container.
+
+6. **Environment Variables:**
+   - Set environment variables in `docker-compose.yml` as needed for Django settings.
+
+7. **Static Files:**
+   - Static files are collected automatically on container startup.
+
+---
+
+### Multi-Operation Features
+
+Stepping Stones supports multiple operations, each with its own isolated SQLite3 database. This allows you to:
+- Import, manage, and switch between different operations from the UI.
+- Run migrations for all operation databases using `python manage.py migrate_all_ops`.
+- Keep data for each engagement separate and secure.
+
+Operation import and management is available via the web UI and Django admin.
+
+---
+
+### LDAP Integration with Django Config
+
+Stepping Stones supports LDAP authentication with dynamic configuration:
+- LDAP settings (including server URI, bind DN, search bases, filters, TLS/CA options, etc.) are stored in the database and editable via the Django admin page (`/admin`)
+- The application dynamically patches Django settings at runtime to ensure `django-auth-ldap` always uses the latest config from the database.
+- Supports advanced LDAP options such as disabling referrals, custom CA certs, and TLS requirements.
+- All relevant LDAP/TLS options are exposed in the admin for flexibility and debugging.
+- For production, ensure your CA cert is available in the container and referenced in the LDAP settings.
+
+---
+
 ### Cobalt Strike Integration
 
 * Placed a LICENSED Cobalt Strike in /opt/cobaltstrike or c:\tools\cobaltstrike-dist\cobaltstrike
@@ -155,6 +213,7 @@ Neo4j servers configured via the web UI will be used to:
 * Update the BloodHound `owned` status when credentials get added with a password, or a beacon is run on a specific host as system.
 * Populate the Source/Target dropdowns with users and computers
 * Provide additional reporting on accounts in the credentials section of Stepping Stones
+* Search BloodHound data and allow for automatic tree searching
 
 ## Reporting Plugins
 

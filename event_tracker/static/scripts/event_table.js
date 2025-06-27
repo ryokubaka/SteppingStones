@@ -99,4 +99,16 @@ function descriptionRender (data, type, row) {
 
 function tableDrawCallback (settings) {
       $('.output').expander({slicePoint: 200, normalizeWhitespace: false, detailPrefix: '',});
-  }
+}
+
+// Add record limit handling
+$(document).ready(function() {
+    // Set default to 10 records
+    $('#record-limit').val('10');
+    
+    // Handle record limit changes
+    $('#record-limit').on('change', function() {
+        var limit = $(this).val();
+        $('.dataTable').DataTable().page.len(limit).draw();
+    });
+});

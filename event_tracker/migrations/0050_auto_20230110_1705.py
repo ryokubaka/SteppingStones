@@ -10,41 +10,75 @@ APPS = [
 
 
 def create_applications_permissions():
-    for app in APPS:
-        app_config = apps.get_app_config(app)
-        create_permissions(app_config)
+    # This function should only run when migrating the 'default' database.
+    # It's generally called by Django post_migrate, doing it here needs care.
+    print("Migration 0050: create_applications_permissions called.")
+    for app_name in APPS:
+        print(f"Migration 0050: Creating permissions for app: {app_name}")
+        app_config = apps.get_app_config(app_name)
+        # Ensure create_permissions is also targeting the default DB if it does writes.
+        # However, create_permissions itself doesn't take a `using` argument.
+        # It operates on the app_config. It should be fine if App Registry is correctly sourced from 'default'.
+        create_permissions(app_config, verbosity=0) # verbosity=0 to suppress output unless error
 
 
 def create_blueteam_role(apps, schema_editor):
-    create_applications_permissions()  # Ensure values exist in DB to reference.
-                                       # Not normally made by Django until after migration via a 'post_migrate' signal.
+    print(f"Migration 0050: create_blueteam_role called. Connection alias: {schema_editor.connection.alias}")
+    if schema_editor.connection.alias != 'default':
+        print(f"Migration 0050: create_blueteam_role - Skipping on non-default DB alias: {schema_editor.connection.alias}")
+        return
+    print(f"Migration 0050: create_blueteam_role - Proceeding on DB alias: {schema_editor.connection.alias}")
+
+    # Safely call permission creation only on default DB.
+    create_applications_permissions()
 
     Group = apps.get_model('auth', 'Group')
     Permission = apps.get_model('auth', 'Permission')
-    newgroup = Group(name="Client Blue Team")
-    newgroup.save()
+    group_name = "Client Blue Team"
 
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacksubtechnique", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacktactic", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_attacktechnique", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_context", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_event", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_file", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_filedistribution", content_type__app_label="event_tracker"))
-    newgroup.permissions.add(Permission.objects.get(codename="view_task", content_type__app_label="event_tracker"))
-    newgroup.save()
+    newgroup, created = Group.objects.using('default').get_or_create(name=group_name)
+    if created:
+        print(f"Migration 0050: Group '{group_name}' created on 'default' DB.")
+    else:
+        print(f"Migration 0050: Group '{group_name}' already existed on 'default' DB.")
+
+    permissions_to_add_codenames = [
+        "view_attacksubtechnique",
+        "view_attacktactic",
+        "view_attacktechnique",
+        "view_context",
+        "view_event",
+        "view_file",
+        "view_filedistribution",
+        "view_task",
+    ]
+
+    for codename in permissions_to_add_codenames:
+        try:
+            perm = Permission.objects.using('default').get(codename=codename, content_type__app_label='event_tracker')
+            newgroup.permissions.add(perm) # This m2m add will use the 'default' alias due to newgroup being from default
+        except Permission.DoesNotExist:
+            print(f"Migration 0050: Permission '{codename}' not found for app 'event_tracker' on 'default' DB. This might indicate an issue or that it is created later.")
+    
+    # newgroup.save(using='default') # Not strictly necessary after get_or_create and m2m .add()
 
 
 def delete_blueteam_role(apps, schema_editor):
+    print(f"Migration 0050: delete_blueteam_role called. Connection alias: {schema_editor.connection.alias}")
+    if schema_editor.connection.alias != 'default':
+        print(f"Migration 0050: delete_blueteam_role - Skipping on non-default DB alias: {schema_editor.connection.alias}")
+        return
+    print(f"Migration 0050: delete_blueteam_role - Proceeding on DB alias: {schema_editor.connection.alias}")
     Group = apps.get_model('auth', 'Group')
-    Group.objects.filter(name="Client Blue Team").delete()
+    Group.objects.using('default').filter(name="Client Blue Team").delete()
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
         ('event_tracker', '0049_credential_complexity_and_more'),
-        ('auth', '0012_alter_user_first_name_max_length'),
+        # ('auth', '0012_alter_user_first_name_max_length'), # Original auth dependency
+        ('auth', '__latest__'), # Ensure all auth migrations run before this one on default DB
     ]
 
     operations = [

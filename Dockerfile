@@ -24,6 +24,11 @@ RUN python3.13 -m venv .venv && \
 
 # Install system dependencies including Java (openjdk-17-jre)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libldap2-dev \
+    libsasl2-dev \
+    libssl-dev \
+    ldap-utils \
     build-essential \
     libpq-dev \
     netcat-traditional \
@@ -46,7 +51,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Expose port 8000 for Gunicorn
+# Expose port 8123 for Gunicorn
 EXPOSE 8000
 
 # Default command - run Gunicorn on 0.0.0.0:8000

@@ -18,6 +18,7 @@ from django.urls import reverse
 from django.core import validators
 from django.forms.fields import URLField as FormURLField
 from django.utils.translation import gettext_lazy as _
+from django.core.exceptions import ValidationError
 
 timezones = [value for value in sorted(zoneinfo.available_timezones()) if value != 'localtime']
 
@@ -38,6 +39,53 @@ class Task(models.Model):
 
     def __str__(self):
         return f"{self.code} {self.name}"
+
+
+@reversion.register()
+class Operation(models.Model):
+    name = models.CharField(max_length=100, unique=True, help_text="A unique name for the operation, used for the database filename (e.g., 'op_alpha_2024'). Should be safe for filenames.")
+    display_name = models.CharField(max_length=200, help_text="A user-friendly display name for the operation (e.g., 'Operation Alpha - Q1 2024').")
+    # Add other fields as needed, e.g., creation_date, description, status, etc.
+    # created_at = models.DateTimeField(auto_now_add=True)
+    # is_active = models.BooleanField(default=False) # To mark an operation as the globally active one, if needed.
+
+    def __str__(self):
+        return self.display_name
+
+    class Meta:
+        ordering = ['display_name']
+
+
+class CurrentOperation(models.Model):
+    """
+    Singleton model to store the current active operation.
+    This allows the application to retain knowledge of the active operation
+    across restarts, independent of user sessions.
+    """
+    operation = models.ForeignKey(Operation, on_delete=models.SET_NULL, null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        """Override save to ensure there's only one instance of this model."""
+        if not self.pk and CurrentOperation.objects.exists():
+            # If primary key is not set and an instance already exists, update that instance
+            self.pk = CurrentOperation.objects.first().pk
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_current(cls):
+        """Get the current operation or None if not set."""
+        instance = cls.objects.first()
+        if instance:
+            return instance.operation
+        return None
+
+    @classmethod
+    def set_current(cls, operation):
+        """Set the current operation."""
+        instance, created = cls.objects.get_or_create(pk=1)
+        instance.operation = operation
+        instance.save()
+        return instance
 
 
 @reversion.register()
@@ -376,3 +424,117 @@ class BloodhoundServer(models.Model):
         scheme = connection_url.scheme.rstrip("+s")
 
         return f"{scheme}://{self.username}@{connection_url.netloc}"
+
+
+class LDAPSettings(models.Model):
+    """Model to store LDAP authentication settings."""
+    enabled = models.BooleanField(
+        default=False,
+        help_text=_("Enable/disable LDAP authentication")
+    )
+    server_uri = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("LDAP server URI (e.g., ldap://ldap.example.com)")
+    )
+    bind_dn = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("DN to bind to LDAP server (e.g., cn=django-agent,dc=example,dc=com)")
+    )
+    bind_password = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("Password for bind DN")
+    )
+    user_search_base = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("Base DN for user search (e.g., ou=users,dc=example,dc=com)")
+    )
+    user_search_filter = models.CharField(
+        max_length=255,
+        default="(uid=%(user)s)",
+        help_text=_("LDAP search filter for users")
+    )
+    group_search_base = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("Base DN for group search (e.g., ou=groups,dc=example,dc=com)")
+    )
+    group_search_filter = models.CharField(
+        max_length=255,
+        default="(objectClass=groupOfNames)",
+        help_text=_("LDAP search filter for groups")
+    )
+    require_group = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("Required group DN for access (e.g., cn=enabled,ou=groups,dc=example,dc=com)")
+    )
+    deny_group = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_("Denied group DN (e.g., cn=disabled,ou=groups,dc=example,dc=com)")
+    )
+    user_attr_map = models.JSONField(
+        default=dict,
+        help_text=_("Mapping of Django user attributes to LDAP attributes")
+    )
+    user_flags_by_group = models.JSONField(
+        default=dict,
+        help_text=_("Mapping of Django user flags to LDAP groups")
+    )
+    cache_timeout = models.IntegerField(
+        default=3600,
+        help_text=_("Cache timeout in seconds for LDAP queries")
+    )
+    tls_require_cert = models.IntegerField(
+        default=0,
+        help_text="Value for ldap.OPT_X_TLS_REQUIRE_CERT (e.g., 0 for never, 1 for allow, 2 for demand, 3 for hard, 4 for try)"
+    )
+    tls_demand = models.IntegerField(
+        default=0,
+        help_text="Value for ldap.OPT_X_TLS_DEMAND (usually 0 or 1)"
+    )
+    tls_cacertfile = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Path to CA certificate file for LDAPS"
+    )
+
+    class Meta:
+        verbose_name = _("LDAP Settings")
+        verbose_name_plural = _("LDAP Settings")
+
+    def clean(self):
+        if self.enabled:
+            if not self.server_uri:
+                raise ValidationError(_("Server URI is required when LDAP is enabled"))
+            if not self.bind_dn:
+                raise ValidationError(_("Bind DN is required when LDAP is enabled"))
+            if not self.user_search_base:
+                raise ValidationError(_("User search base is required when LDAP is enabled"))
+
+    def __str__(self):
+        return f"LDAP Settings ({'Enabled' if self.enabled else 'Disabled'})"
+
+    @classmethod
+    def get_settings(cls):
+        """Get the current LDAP settings, creating default if none exist."""
+        settings, created = cls.objects.get_or_create(
+            defaults={
+                'enabled': False,
+                'user_attr_map': {
+                    'first_name': 'givenName',
+                    'last_name': 'sn',
+                    'email': 'mail',
+                },
+                'user_flags_by_group': {
+                    'is_active': 'cn=active,ou=groups,dc=example,dc=com',
+                    'is_staff': 'cn=staff,ou=groups,dc=example,dc=com',
+                    'is_superuser': 'cn=superuser,ou=groups,dc=example,dc=com',
+                }
+            }
+        )
+        return settings

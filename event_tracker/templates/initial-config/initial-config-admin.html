@@ -3,7 +3,7 @@
 {% load django_bootstrap5 %}
 
 {% block title %}
-Create Task
+Create Initial Admin User
 {% endblock title %}
 
 {% block body %}
@@ -15,7 +15,7 @@ Create Task
         <form method="post">{% csrf_token %}
             {% bootstrap_form form layout='horizontal' %}
 
-            {% bootstrap_form preferences_form layout='horizontal' %}
+            {# {% bootstrap_form preferences_form layout='horizontal' %} #}
 
             <button type="submit" class="btn btn-success">Create</button>
         </form>

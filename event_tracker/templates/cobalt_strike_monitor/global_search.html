@@ -1,0 +1,525 @@
+{% extends "base/base.html" %}
+{% load static %}
+
+{% block cobalt-strike-menu-class %}
+active
+{% endblock %}
+
+{% block title %}
+Global Search
+{% endblock title %}
+
+{% block head %}
+    {% include "base/external-libs/jquery.html" %}
+    {% include "base/external-libs/datatables-pdfexport.html" %}
+
+    <script src="{% static "/scripts/jquery.expander.js" %}"></script>
+
+    <link rel="stylesheet" href="{% static "css/event_table.css"%}">
+    <script src="{% static "scripts/event_table.js" %}"></script>
+    <script nonce="{{request.csp_nonce}}">
+    let eventTableConfig = {
+        monospaceFontURL: '{{request.scheme}}://{{request.META.HTTP_HOST}}{% static "fonts/RobotoMono-Regular.ttf" %}',
+        brandingSVG: '{{REPORT_FOOTER_IMAGE}}',
+        brandingText: '{{REPORT_FOOTER_TEXT}}',
+        totalColumns: 7,
+        descriptionColumn: 5,
+    }
+    </script>
+    
+    <style nonce="{{request.csp_nonce}}">
+    .fa-ul {
+        margin-left: 30px; margin-bottom: 0px
+    }
+
+    table.dataTable tr td:nth-child(6) {
+        word-break: break-all;
+    }
+    .dt-buttons {
+        float: right;
+        padding-left: .25em;
+    }
+    .dt-buttons > .btn {
+        padding: .200rem .75rem;
+    }
+    div.dataTables_wrapper div.dataTables_info {
+        padding-top: 0;
+    }
+    
+    div:has(+.dt-layout-table) {
+        padding-top: 0.5em;
+        padding-bottom: 1em;
+    }
+    
+    .more-link {
+        white-space: nowrap;
+    }
+    
+    .operation-section {
+        margin-bottom: 2rem;
+        border: 1px solid #dee2e6;
+        border-radius: 0.375rem;
+        overflow: hidden;
+    }
+    
+    .operation-header {
+        background-color: #0e4378;
+        padding: 0.75rem 1rem;
+        font-weight: 600;
+        border-bottom: 1px solid #dee2e6;
+    }
+    
+    .operation-search {
+        padding: 1rem;
+        background-color: #0e4378;
+        border-bottom: 1px solid #dee2e6;
+    }
+    
+    .table-responsive {
+        max-height: 600px;
+        overflow-y: auto;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 2rem;
+        color: #6c757d;
+    }
+    
+    .no-results {
+        text-align: center;
+        padding: 2rem;
+        color: #6c757d;
+    }
+    
+    .alert {
+        margin: 1rem;
+    }
+    
+    /* Style for expandable content */
+    .output {
+        word-break: break-all;
+    }
+    
+    /* Ensure description column has proper word wrapping */
+    table.dataTable tr td:nth-child(6) {
+        word-break: break-all;
+    }
+    </style>
+{% endblock head %}
+
+{% block body %}
+{% block bootstrap5_content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-12">
+            <h2><i class="fas fa-search"></i> Global Search</h2>
+            <p class="text-muted">Search across multiple Cobalt Strike operations simultaneously</p>
+            
+            <!-- Global Search Bar -->
+            <div class="row mb-4">
+                <div class="col-md-8">
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="fas fa-search"></i></span>
+                        <input type="text" class="form-control" id="global-search" placeholder="Search across all selected operations...">
+                        <button class="btn btn-primary" type="button" id="global-search-btn">Search</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Operation Selection -->
+            <div class="row mb-4">
+                <div class="col-md-12">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="mb-0">Select Operations</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="select-all-operations">
+                                        <label class="form-check-label" for="select-all-operations">
+                                            <strong>Select All Operations</strong>
+                                        </label>
+                                    </div>
+                                    <hr>
+                                    <div id="operation-checkboxes">
+                                        {% for operation in operations %}
+                                        <div class="form-check">
+                                            <input class="form-check-input operation-checkbox" type="checkbox" 
+                                                   value="{{ operation.name }}" id="op-{{ operation.name }}">
+                                            <label class="form-check-label" for="op-{{ operation.name }}">
+                                                {{ operation.display_name }}
+                                            </label>
+                                        </div>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <button class="btn btn-success" type="button" id="add-selected-operations">
+                                        <i class="fas fa-plus"></i> Add Selected Operations
+                                    </button>
+                                    <button class="btn btn-secondary" type="button" id="clear-all-operations">
+                                        <i class="fas fa-times"></i> Clear All
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Results Container -->
+            <div id="results-container">
+                <div class="no-results">
+                    <i class="fas fa-search fa-3x mb-3"></i>
+                    <p>Select operations and enter a search term to begin searching across Cobalt Strike logs.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script nonce="{{request.csp_nonce}}">
+$(document).ready(function() {
+    let selectedOperations = [];
+    let operationTables = {};
+    
+    // Select all operations checkbox
+    $('#select-all-operations').change(function() {
+        $('.operation-checkbox').prop('checked', this.checked);
+    });
+    
+    // Add selected operations
+    $('#add-selected-operations').click(function() {
+        selectedOperations = [];
+        $('.operation-checkbox:checked').each(function() {
+            selectedOperations.push($(this).val());
+        });
+        
+        if (selectedOperations.length === 0) {
+            alert('Please select at least one operation.');
+            return;
+        }
+        
+        // Clear existing results
+        $('#results-container').empty();
+        
+        // Add loading indicator
+        $('#results-container').html('<div class="loading"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Loading operations...</p></div>');
+        
+        // Perform search
+        performGlobalSearch();
+    });
+    
+    // Clear all operations
+    $('#clear-all-operations').click(function() {
+        selectedOperations = [];
+        $('.operation-checkbox').prop('checked', false);
+        $('#select-all-operations').prop('checked', false);
+        $('#results-container').html('<div class="no-results"><i class="fas fa-search fa-3x mb-3"></i><p>Select operations and enter a search term to begin searching across Cobalt Strike logs.</p></div>');
+    });
+    
+    // Global search button
+    $('#global-search-btn').click(function() {
+        if (selectedOperations.length === 0) {
+            alert('Please select at least one operation first.');
+            return;
+        }
+        performGlobalSearch();
+    });
+    
+    // Global search on Enter key
+    $('#global-search').keypress(function(e) {
+        if (e.which === 13) {
+            if (selectedOperations.length === 0) {
+                alert('Please select at least one operation first.');
+                return;
+            }
+            performGlobalSearch();
+        }
+    });
+    
+    function performGlobalSearch() {
+        const globalSearchTerm = $('#global-search').val();
+        
+        // Show loading
+        $('#results-container').html('<div class="loading"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Searching across operations...</p></div>');
+        
+        // Build request parameters
+        const data = {
+            'operations[]': selectedOperations
+        };
+        if (globalSearchTerm) {
+            data.global_search = globalSearchTerm;
+        }
+        
+        // Make AJAX request
+        $.ajax({
+            url: '{% url "event_tracker:cs-global-search-json" %}',
+            method: 'GET',
+            data: data,
+            success: function(response) {
+                displayResults(response.data);
+            },
+            error: function(xhr, status, error) {
+                $('#results-container').html('<div class="alert alert-danger"><i class="fas fa-exclamation-triangle"></i> Error loading search results: ' + error + '</div>');
+            }
+        });
+    }
+    
+    function displayResults(data) {
+        if (!data || Object.keys(data).length === 0) {
+            $('#results-container').html('<div class="no-results"><i class="fas fa-search fa-3x mb-3"></i><p>No results found for the selected operations and search criteria.</p></div>');
+            return;
+        }
+        
+        let resultsHtml = '';
+        
+        Object.keys(data).forEach(operationName => {
+            const operationData = data[operationName];
+            const operationDisplayName = operationData.display_name;
+            const rows = operationData.data || [];
+            const error = operationData.error;
+            
+            if (error) {
+                resultsHtml += `
+                    <div class="operation-section">
+                        <div class="operation-header">${operationDisplayName}</div>
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle"></i> Error loading data: ${error}
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+            
+            if (rows.length === 0) {
+                resultsHtml += `
+                    <div class="operation-section">
+                        <div class="operation-header">${operationDisplayName}</div>
+                        <div class="no-results">No results found for this operation.</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            resultsHtml += `
+                <div class="operation-section">
+                    <div class="operation-header">${operationDisplayName}</div>
+                    <div class="operation-search">
+                        <div class="row">
+                            <div class="col-md-8">
+                                <div class="input-group">
+                                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                                    <input type="text" class="form-control operation-filter" 
+                                           data-operation="${operationName}" 
+                                           placeholder="Filter results for ${operationDisplayName}...">
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="input-group">
+                                    <span class="input-group-text">Jump to ID</span>
+                                    <input type="number" class="form-control jump-to-id-input" 
+                                           data-operation="${operationName}" 
+                                           placeholder="ID" min="1">
+                                    <button class="btn btn-outline-secondary jump-to-id-btn" 
+                                            type="button" data-operation="${operationName}">
+                                        <i class="fas fa-crosshairs"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped operation-table" id="table-${operationName}">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Timestamp</th>
+                                    <th>Operator</th>
+                                    <th>Source</th>
+                                    <th>Target</th>
+                                    <th>Description</th>
+                                    <th>MITRE</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            `;
+            
+            rows.forEach(row => {
+                const timestamp = row.start ? new Date(row.start).toLocaleString() : '-';
+                resultsHtml += `
+                    <tr>
+                        <td>${row.id}</td>
+                        <td>${timestamp}</td>
+                        <td>${row.operator}</td>
+                        <td>${row.source}</td>
+                        <td>${row.target}</td>
+                        <td>${row.description}</td>
+                        <td>${row.tactic}</td>
+                    </tr>
+                `;
+            });
+            
+            resultsHtml += `
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        });
+        
+        $('#results-container').html(resultsHtml);
+        
+        // Initialize DataTables for each operation
+        Object.keys(data).forEach(operationName => {
+            const tableId = `#table-${operationName}`;
+            if ($(tableId).length) {
+                const table = $(tableId).DataTable({
+                    pageLength: 10,
+                    lengthChange: true,
+                    paging: true,
+                    searching: true, // Enable built-in search
+                    info: true,
+                    order: [[0, 'desc']], // Sort by ID column (0-indexed) in descending order
+                    language: {
+                        entries: {
+                            _: 'logs',
+                            1: 'log'
+                        }
+                    },
+                    columns: [
+                        { data: 'id', orderable: true, width: "5%" },
+                        { data: 'start', width: "10%" },
+                        { data: 'operator', orderable: true, width: "6%" },
+                        { data: 'source', orderable: false, width: "12%" },
+                        { data: 'target', orderable: false, width: "12%" },
+                        { data: 'description', orderable: false, width: "45%" },
+                        { data: 'tactic', orderable: true, width: "5%" },
+                    ],
+                    drawCallback: function() {
+                        var api = $.fn.dataTable.Api(this);
+                        $(`#table-${operationName} tbody tr td:nth-child(6)`).expander({
+                            slicePoint: 200, 
+                            normalizeWhitespace: false, 
+                            detailPrefix: ''
+                        });
+                        
+                        // Check if we need to highlight a record after page load
+                        if (window.jumpToIdTarget) {
+                            var targetId = window.jumpToIdTarget;
+                            // Clear any existing highlights
+                            api.rows().nodes().each(function() {
+                                $(this).removeClass('table-warning');
+                            });
+                            // Find and highlight the target record
+                            var found = false;
+                            api.rows().every(function() {
+                                var rowData = this.data();
+                                if (rowData && rowData.id == targetId) {
+                                    var rowNode = this.node();
+                                    $(rowNode).addClass('table-warning');
+                                    found = true;
+                                    setTimeout(function() {
+                                        if (rowNode && typeof rowNode.scrollIntoView === 'function') {
+                                            rowNode.scrollIntoView({behavior: 'smooth', block: 'center'});
+                                        }
+                                    }, 100);
+                                    return false; // break
+                                }
+                            });
+                            if (!found) {
+                                alert('ID ' + targetId + ' not found on the current page.');
+                                window.jumpToIdTarget = null;
+                            } else {
+                                window.jumpToIdTarget = null; // Clear the target only if found
+                            }
+                        }
+                    }
+                });
+                // Store the DataTables API instance
+                operationTables[operationName] = $.fn.dataTable.Api(table.table().node());
+            }
+        });
+        
+        // Add filtering functionality after DataTables are initialized
+        $(document).off('keyup', '.operation-filter').on('keyup', '.operation-filter', function() {
+            const operationName = $(this).data('operation');
+            const filterValue = $(this).val().toLowerCase();
+            const api = operationTables[operationName];
+            if (api) {
+                api.search(filterValue).draw();
+            }
+        });
+        
+        // Add jump to ID functionality for each operation table
+        $(document).off('click', '.jump-to-id-btn').on('click', '.jump-to-id-btn', function() {
+            const operationName = $(this).data('operation');
+            const input = $(`.jump-to-id-input[data-operation="${operationName}"]`);
+            jumpToIdInOperation(operationName, input.val().trim());
+        });
+        
+        $(document).off('keypress', '.jump-to-id-input').on('keypress', '.jump-to-id-input', function(e) {
+            if (e.which === 13) {
+                const operationName = $(this).data('operation');
+                jumpToIdInOperation(operationName, $(this).val().trim());
+            }
+        });
+        
+        function jumpToIdInOperation(operationName, targetId) {
+            if (!targetId) {
+                alert('Please enter an ID number');
+                return;
+            }
+            const api = operationTables[operationName];
+            if (!api) {
+                alert('Table not found for operation: ' + operationName);
+                return;
+            }
+            
+            // Clear any existing highlights
+            api.rows().nodes().each(function() {
+                $(this).removeClass('table-warning');
+            });
+            
+            var currentLength = api.page.len();
+            
+            // First, get the page number for this ID from the backend
+            $.ajax({
+                url: '{% url "event_tracker:cs-global-search-json" %}',
+                method: 'GET',
+                data: {
+                    page_for_id: targetId,
+                    operation: operationName,
+                    length: currentLength
+                },
+                success: function(response) {
+                    if (response.debug) {
+                        console.log("DEBUG info from backend:", response.debug);
+                    }
+                    if (response.found && response.page) {
+                        // Set the target ID to highlight after page load
+                        window.jumpToIdTarget = targetId;
+                        
+                        // Clear the search box and redraw
+                        api.search('').draw();
+                        
+                        // Navigate to the page containing the ID
+                        api.page(response.page - 1).draw('page'); // DataTables uses 0-based indexing
+                        
+                    } else {
+                        alert('ID ' + targetId + ' not found in operation: ' + operationName);
+                    }
+                },
+                error: function() {
+                    alert('Error looking up ID ' + targetId + ' in operation: ' + operationName);
+                }
+            });
+        }
+    }
+});
+</script>
+{% endblock bootstrap5_content %}
+{% endblock body %} 

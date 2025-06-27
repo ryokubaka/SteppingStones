@@ -7,12 +7,26 @@ from django.dispatch import receiver
 
 from cobalt_strike_monitor.models import TeamServer, BeaconPresence, BeaconLog, CSAction, Archive
 from cobalt_strike_monitor.poll_team_server import TeamServerPoller, recent_checkin
+from cobalt_strike_monitor.utils import get_current_active_operation
+import logging
 
+logger = logging.getLogger(__name__)
 
 @receiver(post_save, sender=TeamServer)
 def team_server_listener(sender, instance: TeamServer, **kwargs):
     if instance.active:
-        TeamServerPoller().add(instance.pk)
+        # Update the database alias for the newly activated operation
+        try:
+            current_op = get_current_active_operation()
+            if current_op:
+                logger.info(f"Activating new operation: {current_op.name}")
+                # Set the database alias for the current operation
+                database_alias = 'active_op_db'  # Always use active_op_db
+                TeamServerPoller().add(instance.pk)
+            else:
+                logger.warning("No active operation found when activating new operation.")
+        except Exception as e:
+            logger.error(f"Error activating new operation: {e}")
 
 
 sleep_regex = re.compile(r"Tasked beacon to sleep for (?P<sleep>\d+)s(?: \((?P<jitter>\d+)% jitter\))?")
@@ -34,7 +48,8 @@ def checkin_handler(sender, beacon, metadata, **kwargs):
             .filter(beacon=beacon)\
             .filter(Q(data__startswith="Tasked beacon to sleep for ", type="task")
                     | Q(data="Tasked beacon to become interactive", type="task")
-                    | Q(data__startswith="started SOCKS4a server on: ", type="output"))\
+                    | Q(data__startswith="started SOCKS4a server on: ", type="output")
+                    | Q(data__startswith="started SOCKS5 server on: ", type="output"))\
             .order_by("when").last()
 
         sleep = 0

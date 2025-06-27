@@ -43,4 +43,6 @@ class EventTrackerConfig(AppConfig):
                                                              repeat=eventsourcebackgroundtaskplugin.repeat_seconds,
                                                              remove_existing_tasks=eventsourcebackgroundtaskplugin.replace_existing_tasks)
 
+        import event_tracker.signals  # Import signals when the app is ready
+
 

@@ -74,8 +74,34 @@ Stepping Stones supports multiple operations, each with its own isolated SQLite3
 - Import, manage, and switch between different operations from the UI.
 - Run migrations for all operation databases using `python manage.py migrate_all_ops`.
 - Keep data for each engagement separate and secure.
+- **Operation Switcher**: Use the dropdown in the navigation bar to quickly switch between operations.
+- **Operation Management**: Create, edit, import, and delete operations through the web interface.
 
 Operation import and management is available via the web UI and Django admin.
+
+---
+
+### Global Search & Cross-Operation Analysis
+
+Stepping Stones now includes powerful global search capabilities:
+
+- **Global Search Interface**: Search across multiple Cobalt Strike operations simultaneously from a single interface.
+- **Multi-Operation Selection**: Select specific operations to include in your search or search across all operations.
+- **Advanced Filtering**: Filter results by operation, operator, source, target, and content.
+- **Cross-Operation Context**: View and compare activities across different engagements to identify patterns and correlations.
+
+Access global search via the Cobalt Strike monitor section in the web interface.
+
+---
+
+### Jump to ID & Contextual Awareness
+
+Enhanced navigation and contextual awareness features:
+
+- **Jump to ID**: Quickly navigate to specific log entries by entering their ID number. This feature is available in both the CS Logs and Global Search views.
+- **Visual Highlighting**: Target records are automatically highlighted and scrolled into view when using jump-to-ID functionality.
+
+These features help maintain proper context when reviewing Cobalt Strike logs and ensure accurate correlation between commands and their outputs. Execution of multiple tasks in a single check-in will result in beacon output correlating to the incorrect task, but with this feature, you can easily jump to a task ID and correlate the output with surrounding tasks.
 
 ---
 

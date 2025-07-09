@@ -8,4 +8,4 @@ db.sqlite3-shm
 db.sqlite3-wal
 
 ops-data/*
-certs/*
+nginx/certs/*

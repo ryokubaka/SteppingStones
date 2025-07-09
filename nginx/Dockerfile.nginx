@@ -1,0 +1,35 @@
+FROM nginx:latest
+
+# Install OpenSSL for certificate generation
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+
+# Copy the certificate generation script
+COPY generate_certs.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/generate_certs.sh
+
+# Copy nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+# Generate certificates if they don\'t exist\n\
+if [ ! -f /etc/nginx/certs/steppingstones.cer ] || [ ! -f /etc/nginx/certs/steppingstones.key ]; then\n\
+    echo "Generating SSL certificates for localhost..."\n\
+    mkdir -p /etc/nginx/certs\n\
+    openssl genrsa -out /etc/nginx/certs/steppingstones.key 2048\n\
+    openssl req -new -x509 -key /etc/nginx/certs/steppingstones.key -out /etc/nginx/certs/steppingstones.cer -days 365 -subj "/C=US/ST=Development/L=Local/O=SteppingStones/OU=Development/CN=localhost"\n\
+    chmod 644 /etc/nginx/certs/steppingstones.cer\n\
+    chmod 600 /etc/nginx/certs/steppingstones.key\n\
+    echo "Certificates generated successfully!"\n\
+else\n\
+    echo "Certificates already exist, skipping generation."\n\
+fi\n\
+\n\
+# Start nginx\n\
+exec nginx -g "daemon off;"' > /docker-entrypoint.sh
+
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 80 443 4321
+
+ENTRYPOINT ["/docker-entrypoint.sh"] 

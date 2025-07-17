@@ -41,7 +41,9 @@ services:
     restart: always
 
   web:
-    image: nginx:latest
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile.nginx
     container_name: web
     ports:
       - "443:443"

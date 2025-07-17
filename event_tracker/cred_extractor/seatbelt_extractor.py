@@ -15,13 +15,11 @@ class CredEnumExtractor(CredentialExtractorGenerator):
 
     def cred_generator(self, input_text: str, default_system: str):
         for match in credenum_regex.finditer(input_text):
-            match_dict = match.groupdict()
-
             # Teams stores creds hex encoded in the cred store, so decode
-            secret = match_dict.pop("secret")
+            secret = match.groupdict().pop("secret")
             if secret and re.match("^([0-9A-f]{2} )+[0-9A-f]{2}$", secret, re.IGNORECASE):
                 secret = bytes.fromhex(secret).decode("utf-8")
 
-            yield Credential(**match_dict, secret=secret,
+            yield Credential(**match.groupdict(), secret=secret,
                              purpose="Stored Credentials",
                              source="Seatbelt CredEnum")

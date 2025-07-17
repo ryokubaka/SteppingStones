@@ -6,8 +6,12 @@ from event_tracker.models import Credential, HashCatMode
 #domain_cached_credential2_regex = re.compile(
 #    r'(?P<system>' + valid_windows_domain + ')/[^\s/\:]+:(?P<hash>\$DCC2\$\d+#(?P<account>[^#]+)#[0-9a-f]{32})')
 
+valid_windows_domain = r'(?:[A-Za-z0-9._-]+)'  # Example pattern for domain
+
 domain_cached_credential2_regex = re.compile(
     rf'(?P<system>{valid_windows_domain})/[^\s/:]+:(?P<hash>\$DCC2\$\d+#(?P<account>[^#]+)#[0-9a-f]{{32}})')
+
+
 
 class DCC2Extractor(CredentialExtractorGenerator):
     def cred_generator(self, input_text: str, default_system: str):

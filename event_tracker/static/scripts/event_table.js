@@ -6,8 +6,8 @@ function pdfExportCustomize(doc, config, dt) {
             normal: eventTableConfig.monospaceFontURL,
         },
         Roboto: {
-            normal: 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Regular.ttf',
-            bold: 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Medium.ttf',
+            normal: '/static/fonts/pdfmake/Roboto-Regular.ttf',
+            bold: '/static/fonts/pdfmake/Roboto-Medium.ttf',
         },
     }
 

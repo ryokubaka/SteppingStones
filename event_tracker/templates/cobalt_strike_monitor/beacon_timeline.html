@@ -15,7 +15,8 @@ CS Beacon Timeline
 {% block head %}
     {% include "base/external-libs/jquery.html" %}
     {% include "base/external-libs/momentjs.html" %}
-    <script src="https://cdn.jsdelivr.net/npm/timelines-chart@2.12.1/dist/timelines-chart.min.js" integrity="sha384-iGu4wltko+k58uoi9LkXqLN+0n6eytdA8XafHeDjfPzOtf7Szhgu4DocjbTCVAWP" crossorigin="anonymous"></script>
+    {% load static %}
+    <script src="{% static 'scripts/external/timelines-chart.min.js' %}"></script>
 {% endblock head %}
 
 {% block body %}

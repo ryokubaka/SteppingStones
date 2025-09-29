@@ -208,12 +208,12 @@ TAGGIT_CASE_INSENSITIVE = True
 SECURE_REFERRER_POLICY = "same-origin"
 
 CSP_DEFAULT_SRC = ("'none'",)
-CSP_SCRIPT_SRC_ELEM = ("'self'", "cdnjs.cloudflare.com", "cdn.datatables.net", "cdn.jsdelivr.net", "unpkg.com", "api.ipify.org")
+CSP_SCRIPT_SRC_ELEM = ("'self'",)
 CSP_SCRIPT_SRC_ATTR = ("'unsafe-inline'",)
-CSP_STYLE_SRC_ELEM = ("'self'", "cdnjs.cloudflare.com", "cdn.datatables.net", "cdn.jsdelivr.net")
+CSP_STYLE_SRC_ELEM = ("'self'",)
 CSP_FONT_SRC = ("'self'", "data:")
-CSP_IMG_SRC = ("'self'", "data:", "cdnjs.cloudflare.com")
-CSP_CONNECT_SRC = ("'self'", "cdnjs.cloudflare.com")  # Used for pdfMake to fetch fonts
+CSP_IMG_SRC = ("'self'", "data:")
+CSP_CONNECT_SRC = ("'self'",)  # No external connections needed
 CSP_WORKER_SRC = ("'self'",)
 CSP_INCLUDE_NONCE_IN = ['script-src-elem', 'style-src-elem']
 CSP_FRAME_ANCESTORS = ("'self'",)

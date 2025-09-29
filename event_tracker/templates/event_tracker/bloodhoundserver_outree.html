@@ -11,9 +11,10 @@ BloodHound Servers
 
 {% block head %}
 {% include "base/external-libs/jquery.html" %}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.16/jstree.min.js" integrity="sha512-ekwRoEshEqHU64D4luhOv/WNmhml94P8X5LnZd9FNOiOfSKgkY12cDFz3ZC6Ws+7wjMPQ4bPf94d+zZ3cOjlig==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.16/themes/default/style.min.css" media="(prefers-color-scheme: light) or (prefers-color-scheme: no-preference)" integrity="sha512-A5OJVuNqxRragmJeYTW19bnw9M2WyxoshScX/rGTgZYj5hRXuqwZ+1AVn2d6wYTZPxPXxDeAGlae0XwTQdXjQA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.16/themes/default-dark/style.min.css" media="(prefers-color-scheme: dark)" integrity="sha512-CQDjN7GvO35Yq+qvFhfRO6mNhjEHoJ2xGcCV4EOQB10jdBjLKZN5DkXkoNg0VKq4/BfKyMtkqoZ2WmhGnT9Tmw==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+{% load static %}
+<script src="{% static 'scripts/external/jstree.min.js' %}"></script>
+<link rel="stylesheet" href="{% static 'css/external/jstree-default.min.css' %}" media="(prefers-color-scheme: light) or (prefers-color-scheme: no-preference)" />
+<link rel="stylesheet" href="{% static 'css/external/jstree-default-dark.min.css' %}" media="(prefers-color-scheme: dark)" />
 
 <style nonce="{{request.csp_nonce}}">
 #jstree_div {

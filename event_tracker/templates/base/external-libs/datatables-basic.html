@@ -1,5 +1,5 @@
-{# use https://www.srihash.org/ for integrity if not on https://cdnjs.com/ #}
-<link rel="stylesheet" href="https://cdn.datatables.net/v/bs5/dt-2.1.4/b-3.1.1/date-1.5.3/fh-4.0.1/sb-1.8.0/datatables.min.css" integrity="sha384-NkgQmT2leS1PF3E0GY/HMojHV3Mv96eC9tatSiT7VgqyJjdS9eYkHqf5rVcS2flU" crossorigin="anonymous">
-<script src="https://cdn.datatables.net/v/bs5/dt-2.1.4/b-3.1.1/date-1.5.3/fh-4.0.1/sb-1.8.0/datatables.min.js" integrity="sha384-R+CZHUf1UzZxEsbywkUnsMtBgx0SoiGKM8wOACZq3sCrK2Tg+2WzcpCGZp7pZy7u" crossorigin="anonymous"></script>
+{% load static %}
+<link rel="stylesheet" href="{% static 'scripts/datatables.min.css' %}">
+<script src="{% static 'scripts/datatables.min.js' %}"></script>
 
 {% include "base/external-libs/datatables-common.html" %}

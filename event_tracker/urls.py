@@ -8,7 +8,7 @@ from .views import EventCreateView, EventUpdateView, EventDeleteView, EventListV
     FileAutocomplete, CSBeaconsListView, CSBeaconToEventView, FileListView, TeamServerListView, BeaconExclusionList, \
     BeaconExclusionDeleteView, WebhookListView, WebhookCreateView, WebhookUpdateView, WebhookDeleteView, \
     CSBeaconsTimelineView, beaconwatch_add, beaconwatch_remove, CSDownloadsListView, CSDownloadToEventView, \
-    EventLatMoveCloneView, CSActionListJSON, \
+    EventLatMoveCloneView, CSActionListJSON, CSACtionCSVExportView, \
     UserListAutocomplete, HostListAutocomplete, ProcessListAutocomplete, InitialConfigTask, InitialConfigAdmin, \
     toggle_event_star, EventTagAutocomplete, TeamServerConfigView, EventStreamListView, EventStreamListJSON, EventStreamUpload, \
     EventStreamToEventView, toggle_qs_stars, LimitedEventUpdateView, EventBulkEdit, \
@@ -77,6 +77,7 @@ urlpatterns = [
 
     path('cs-actions', CSActionListView.as_view(), name='cs-actions-list'),
     path('cs-actions-api', CSActionListJSON.as_view(), name='cs-actions-json'),
+    path('cs-actions/csv', CSACtionCSVExportView.as_view(), name='cs-actions-csv'),
     path('cs-logs/<int:pk>/to_event/', CSLogToEventView.as_view(), name="cs-log-to-event"),
     path('cs-uploads', CSUploadsListView.as_view(), name='cs-uploads-list'),
     path('cs-downloads', CSDownloadsListView.as_view(), name='cs-downloads-list'),

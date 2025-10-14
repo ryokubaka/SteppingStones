@@ -1,14 +1,23 @@
 pdfMake.preserveLeadingSpaces = true
 
 function pdfExportCustomize(doc, config, dt) {
+    // Use the fonts that should be loaded by the template
     pdfMake.fonts = {
         RobotoMono: {
-            normal: eventTableConfig.monospaceFontURL,
+            normal: 'RobotoMono-Regular.ttf',
         },
         Roboto: {
-            normal: '/static/fonts/pdfmake/Roboto-Regular.ttf',
-            bold: '/static/fonts/pdfmake/Roboto-Medium.ttf',
+            normal: 'Roboto-Regular.ttf',
+            bold: 'Roboto-Medium.ttf',
         },
+    }
+    
+    if (typeof pdfMake !== 'undefined') {        
+        // Override any default font configurations that might be causing issues
+        if (!pdfMake.defaultStyle) {
+            pdfMake.defaultStyle = {};
+        }
+        pdfMake.defaultStyle.font = 'Roboto';
     }
 
     doc.styles['terminal'] = {
@@ -66,7 +75,18 @@ function pdfExportCustomize(doc, config, dt) {
     }
 }
 
-function pdfExportAction (e, dt, node, config, cb) {
+function pdfExportAction (e, dt, node, config, cb) {   
+    // Check if fonts are loaded, if not wait for them
+    if (!window.fontsLoaded) {
+        const checkFonts = setInterval(() => {
+            if (window.fontsLoaded) {
+                clearInterval(checkFonts);
+                pdfExportAction(e, dt, node, config, cb);
+            }
+        }, 100);
+        return;
+    }
+
     let outer_dt = dt;
     let outer_config = config;
     let orig_len = dt.page.len();
@@ -75,6 +95,12 @@ function pdfExportAction (e, dt, node, config, cb) {
     doExport = function (e, _dt, node, _config, cb) {
         // Deregister the event handler
         dt.off('draw', doExport);
+        
+        // Ensure fonts are configured before PDF generation
+        if (typeof window.ensurePdfMakeFonts === 'function') {
+            window.ensurePdfMakeFonts();
+        }
+
         // Trigger the print action
         $.fn.dataTable.ext.buttons.pdfHtml5.action.call(outer_dt.button(), e, outer_dt, node, outer_config, outer_cb);
         // Redraw the table at the original page size

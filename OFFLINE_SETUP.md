@@ -14,6 +14,17 @@ This document describes the changes made to make the Stepping Stones application
 - **DateTime Moment Plugin**: Downloaded and added to `static/scripts/datetime-moment.min.js`
 - **Exo Font**: Downloaded weights 200 and 400, added to `static/fonts/exo/` with local CSS file
 - **FontAwesome**: Already local, no changes needed
+- **DataTables**: Already local, no changes needed
+- **HTMX 2.0.3**: Downloaded and added to `static/scripts/external/htmx.min.js`
+- **Crypto-JS 4.1.1**: Downloaded core, md5, sha1, sha256 modules to `static/scripts/external/`
+- **Select2 Bootstrap 5 Theme**: Downloaded and added to `static/css/external/select2-bootstrap-5-theme.min.css`
+- **JS Tree 3.3.16**: Downloaded JS and CSS themes to `static/scripts/external/` and `static/css/external/`
+- **Timelines Chart 2.12.1**: Downloaded and added to `static/scripts/external/timelines-chart.min.js`
+- **Turndown 7.1.3**: Downloaded and added to `static/scripts/external/turndown.js`
+- **Turndown GFM Plugin 1.0.2**: Downloaded and added to `static/scripts/external/turndown-plugin-gfm.js`
+- **Highlight.js 11.9.0**: Downloaded JS, CSS themes, and properties language to `static/scripts/external/` and `static/css/external/`
+- **Clipboard.js 2.0.11**: Downloaded and added to `static/scripts/external/clipboard.min.js`
+- **PDFMake Fonts**: Downloaded Roboto Regular and Medium fonts to `static/fonts/pdfmake/`
 
 ### 2. Template Updates
 - **base.html**: Updated to use local static files instead of CDN URLs
@@ -22,14 +33,26 @@ This document describes the changes made to make the Stepping Stones application
 - **momentjs.html**: Updated to use local moment.js instead of CDN and added missing `{% load static %}` tag
 - **datatables-pdfexport.html**: Updated to use local pdfmake instead of CDN
 - **datatables-common.html**: Updated to use local datetime-moment plugin instead of CDN
+- **datatables-basic.html**: Updated to use local DataTables instead of CDN
+- **event_form.html**: Updated to use local HTMX, Crypto-JS, and Select2 theme
+- **event_form_limited.html**: Updated to use local Select2 theme
+- **event_bulk_edit.html**: Updated to use local Select2 theme
+- **bloodhoundserver_outree.html**: Updated to use local JS Tree
+- **bloodhoundserver_node.html**: Updated to use local Bootstrap
+- **beacon_timeline.html**: Updated to use local Timelines Chart
+- **turndown-tables.html**: Updated to use local Turndown libraries
+- **highlightjs.html**: Updated to use local Highlight.js
+- **highlightjs-properties.html**: Updated to use local Highlight.js properties language
+- **clipboardjs.html**: Updated to use local Clipboard.js
 - Removed all Google Fonts preconnect links and CDN references
+- Disabled IP detection API call for offline mode
 
 ### 3. Content Security Policy (CSP) Updates
-- Added back `cdnjs.cloudflare.com` to script and style sources for remaining external dependencies
+- Removed all external CDN references from CSP directives
 - Added `CSP_SCRIPT_SRC_ATTR = ("'unsafe-inline'",)` to allow inline event handlers
 - Updated `CSP_FONT_SRC = ("'self'", "data:")` to allow local fonts and data URIs
 - Added `CSP_WORKER_SRC = ("'self'",)` to allow service worker registration
-- Now allows `'self'` for font sources and service workers
+- Now allows only `'self'` for all sources - completely offline
 
 ### 4. Service Worker Implementation
 - **Location**: `static/scripts/service-worker.js`
@@ -87,6 +110,25 @@ This document describes the changes made to make the Stepping Stones application
 - `event_tracker/static/fonts/exo/Exo-200.ttf`
 - `event_tracker/static/fonts/exo/Exo-400.ttf`
 - `event_tracker/static/scripts/service-worker.js`
+- `event_tracker/static/scripts/external/htmx.min.js`
+- `event_tracker/static/scripts/external/crypto-js-core.min.js`
+- `event_tracker/static/scripts/external/crypto-js-md5.min.js`
+- `event_tracker/static/scripts/external/crypto-js-sha1.min.js`
+- `event_tracker/static/scripts/external/crypto-js-sha256.min.js`
+- `event_tracker/static/css/external/select2-bootstrap-5-theme.min.css`
+- `event_tracker/static/scripts/external/jstree.min.js`
+- `event_tracker/static/css/external/jstree-default.min.css`
+- `event_tracker/static/css/external/jstree-default-dark.min.css`
+- `event_tracker/static/scripts/external/timelines-chart.min.js`
+- `event_tracker/static/scripts/external/turndown.js`
+- `event_tracker/static/scripts/external/turndown-plugin-gfm.js`
+- `event_tracker/static/scripts/external/highlight.min.js`
+- `event_tracker/static/scripts/external/highlight-properties.min.js`
+- `event_tracker/static/scripts/external/clipboard.min.js`
+- `event_tracker/static/css/external/highlight-default.min.css`
+- `event_tracker/static/css/external/highlight-default-dark.min.css`
+- `event_tracker/static/fonts/pdfmake/Roboto-Regular.ttf`
+- `event_tracker/static/fonts/pdfmake/Roboto-Medium.ttf`
 
 ### Settings
 - `stepping_stones/settings.py` (CSP configuration)

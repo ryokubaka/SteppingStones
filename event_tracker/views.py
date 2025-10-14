@@ -875,6 +875,67 @@ class CSActionListView(PermissionRequiredMixin, TemplateView):
     template_name = "cobalt_strike_monitor/cs_action_list.html"
 
 
+class CSACtionCSVExportView(PermissionRequiredMixin, View):
+    permission_required = 'cobalt_strike_monitor.view_archive'
+    
+    def get(self, request, *args, **kwargs):
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="cobalt_strike_logs.csv"'
+        writer = csv.writer(response)
+        
+        # Write header row
+        writer.writerow([
+            "ID", "Timestamp", "Operator", "Source Host", "Target Host", 
+            "Target User", "Target Process", "Description", "Input", "Output", "MITRE Tactic"
+        ])
+        
+        # Get the same queryset as CSActionListJSON
+        operator_subquery = BeaconLog.objects.filter(cs_action__id=OuterRef('pk'), operator__isnull=False)
+        tactic_subquery = Archive.objects.filter(cs_action__id=OuterRef('pk'), tactic__isnull=False)
+        
+        qs = (CSAction.objects
+                .filter(beacon__in=Beacon.visible_beacons())
+                .annotate(operator_anno=Subquery(operator_subquery.values("operator")[:1]))
+                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1]))
+                .order_by('-start'))
+        
+        # Write data rows
+        for action in qs:
+            # Get source host
+            source_host = "-"
+            if hasattr(action.beacon.listener, "althost") and action.beacon.listener.althost:
+                source_host = action.beacon.listener.althost
+            elif hasattr(action.beacon.listener, "host") and action.beacon.listener.host:
+                source_host = action.beacon.listener.host
+            
+            # Get target information
+            target_host = action.beacon.computer or "-"
+            target_user = action.beacon.user or "-"
+            target_process = action.beacon.process or "-"
+            
+            # Get operator
+            operator = action.operator_anno or "-"
+            
+            # Get MITRE tactic
+            mitre_tactic = action.tactic_anno or "-"
+            
+            writer.writerow([
+                action.id,
+                action.start.strftime('%Y-%m-%d %H:%M:%S') if action.start else "-",
+                operator,
+                source_host,
+                target_host,
+                target_user,
+                target_process,
+                action.description or "",
+                action.input or "",
+                action.output or "",
+                mitre_tactic
+            ])
+        
+        return response
+
+
 class GlobalSearchView(PermissionRequiredMixin, TemplateView):
     permission_required = 'cobalt_strike_monitor.view_archive'
     template_name = "cobalt_strike_monitor/global_search.html"

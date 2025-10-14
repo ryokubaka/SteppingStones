@@ -24,12 +24,466 @@ CS Logs
         brandingText: '{{REPORT_FOOTER_TEXT}}',
         totalColumns: 8,
         descriptionColumn: 5,
+        columnWidths: ['auto', 75, 75, 150, 150, 400, 'auto', 'auto'],
+        columnHeadings: [null, null, null, null, null, null, null, null],
     }
+    
+    // Global flag to track font loading status
+    window.fontsLoaded = false;
+    
+    // Ensure fonts are configured before any PDF generation
+    window.ensurePdfMakeFonts = function() {
+        if (typeof pdfMake !== 'undefined' && window.fontsLoaded) {
+            pdfMake.fonts = {
+                RobotoMono: {
+                    normal: 'RobotoMono-Regular.ttf',
+                },
+                Roboto: {
+                    normal: 'Roboto-Regular.ttf',
+                    bold: 'Roboto-Medium.ttf',
+                },
+            };
+            
+            if (!pdfMake.defaultStyle) {
+                pdfMake.defaultStyle = {};
+            }
+            pdfMake.defaultStyle.font = 'Roboto';
+            
+            return true;
+        }
+        return false;
+    };
+    
+    // Helper function to clean HTML content
+    function cleanHtmlContent(htmlContent) {
+        if (!htmlContent) return '';
+        
+        // Create a temporary div to parse HTML
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlContent;
+        
+        // Extract text content from various HTML structures
+        let cleanText = '';
+        
+        // Handle ul/li structures (for source/target columns)
+        const listItems = tempDiv.querySelectorAll('li');
+        if (listItems.length > 0) {
+            const items = Array.from(listItems).map(li => {
+                // Remove icon spans and get text content
+                const iconSpans = li.querySelectorAll('span.fa-li, i');
+                iconSpans.forEach(span => span.remove());
+                return li.textContent.trim();
+            }).filter(text => text.length > 0);
+            
+            cleanText = items.join('\n');
+        } else {
+            // Handle div structures (for description column)
+            const divs = tempDiv.querySelectorAll('div');
+            if (divs.length > 0) {
+                const sections = Array.from(divs).map(div => {
+                    const className = div.className;
+                    let text = div.textContent.trim();
+                    
+                    // Preserve newlines in the actual content
+                    text = text.replace(/\n/g, '\n');
+                    
+                    if (className.includes('description') && text) {
+                        return 'Description: ' + text;
+                    } else if (className.includes('input') && text) {
+                        return 'Input: ' + text;
+                    } else if (className.includes('output') && text) {
+                        return 'Output: ' + text;
+                    }
+                    return text;
+                }).filter(text => text.length > 0);
+                
+                cleanText = sections.join('\n\n');
+            } else {
+                // Fallback: just get text content
+                cleanText = tempDiv.textContent.trim();
+            }
+        }
+        
+        return cleanText;
+    }
+    
+    // Helper function to copy text to clipboard with Excel-friendly formatting
+    function copyToClipboardExcelFriendly(text) {
+        // Replace newlines with spaces for Excel compatibility (stays in single cell)
+        const excelFriendlyText = text.replace(/\n/g, ' ');
+        
+        if (navigator.clipboard && window.isSecureContext) {
+            // Use modern clipboard API
+            navigator.clipboard.writeText(excelFriendlyText).then(() => {
+                // Show a brief visual feedback
+                showCopyFeedback();
+            }).catch(err => {
+                console.error('Failed to copy text: ', err);
+                fallbackCopyTextToClipboard(excelFriendlyText);
+            });
+        } else {
+            // Fallback for older browsers
+            fallbackCopyTextToClipboard(excelFriendlyText);
+        }
+    }
+    
+    // Helper function to copy specific section (Input or Output)
+    function copySectionToClipboard(htmlContent, sectionType) {
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlContent;
+        
+        const divs = tempDiv.querySelectorAll('div');
+        let sectionText = '';
+        
+        divs.forEach(div => {
+            const className = div.className;
+            const text = div.textContent.trim();
+            
+            if (className.includes(sectionType.toLowerCase()) && text) {
+                sectionText = text;
+            }
+        });
+        
+        if (sectionText) {
+            // Keep newlines preserved - Excel will put it in a single cell with internal newlines
+            const textToCopy = sectionText;
+            
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    showCopyFeedback(`${sectionType} copied to clipboard`);
+                }).catch(err => {
+                    console.error('Failed to copy text: ', err);
+                    fallbackCopyTextToClipboard(textToCopy);
+                });
+            } else {
+                fallbackCopyTextToClipboard(textToCopy);
+            }
+        }
+    }
+    
+    // Fallback copy function for older browsers
+    function fallbackCopyTextToClipboard(text) {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.top = "0";
+        textArea.style.left = "0";
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
+        
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        
+        try {
+            const successful = document.execCommand('copy');
+            if (successful) {
+                showCopyFeedback();
+            }
+        } catch (err) {
+            console.error('Fallback: Oops, unable to copy', err);
+        }
+        
+        document.body.removeChild(textArea);
+    }
+    
+    // Show visual feedback when text is copied
+    function showCopyFeedback(message = 'Copied to clipboard') {
+        // Create a temporary notification
+        const notification = document.createElement('div');
+        notification.textContent = message;
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border-radius: 4px;
+            z-index: 10000;
+            font-size: 14px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        `;
+        
+        document.body.appendChild(notification);
+        
+        // Remove after 2 seconds
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 2000);
+    }
+    
+    // Custom PDF generation function
+    window.generateCustomPDF = function(dt) {
+        // Ensure fonts are configured
+        if (typeof window.ensurePdfMakeFonts === 'function') {
+            window.ensurePdfMakeFonts();
+        }
+        
+        // Get all table data
+        const data = dt.rows({page: 'all'}).data().toArray();
+        const headers = ['ID', 'Timestamp', 'Operator', 'Source', 'Target', 'Description', 'MITRE Tactic'];
+        
+        // Helper function to determine font size based on content length
+        function getDynamicFontSize(content) {
+            const length = content.length;
+            if (length < 100) return 9;      // Large font for short content
+            if (length < 300) return 8;      // Medium font for medium content
+            if (length < 600) return 7;      // Small font for long content
+            return 6;                        // Very small font for very long content
+        }
+        
+        // Process data to clean HTML content with dynamic font sizing
+        const processedData = data.map(row => {
+            const description = cleanHtmlContent(row.data || '');
+            const descriptionLength = description.length;
+            
+            return [
+                row.id || '',
+                row.start || '',
+                row.operator || '',
+                cleanHtmlContent(row.source || ''),
+                cleanHtmlContent(row.target || ''),
+                {
+                    text: description,
+                    fontSize: getDynamicFontSize(description)
+                },
+                row.tactic || ''
+            ];
+        });
+        
+        // Create document definition
+        const docDefinition = {
+            pageSize: 'A4',
+            pageOrientation: 'landscape',
+            content: [
+                { text: 'Cobalt Strike Logs', style: 'header' },
+                { text: 'Generated on: ' + new Date().toLocaleString(), style: 'subheader' },
+                { text: '', margin: [0, 10, 0, 10] },
+                {
+                    table: {
+                        headerRows: 1,
+                        widths: [25, 55, 45, 70, 90, '*', 45], // More flexible widths, description gets remaining space
+                        body: [
+                            headers.map(header => ({ text: header, style: 'tableHeader' })),
+                            ...processedData
+                        ]
+                    }
+                }
+            ],
+            styles: {
+                header: {
+                    fontSize: 16,
+                    bold: true,
+                    alignment: 'center',
+                    margin: [0, 0, 0, 8]
+                },
+                subheader: {
+                    fontSize: 10,
+                    alignment: 'center',
+                    margin: [0, 0, 0, 8]
+                },
+                tableHeader: {
+                    bold: true,
+                    fontSize: 9,
+                    color: 'black'
+                }
+            },
+            defaultStyle: {
+                fontSize: 8, // Larger base font size for non-description columns
+                lineHeight: 1.2 // Slightly more relaxed line spacing
+            },
+            pageMargins: [10, 10, 10, 10] // Smaller margins for more content space
+        };
+        
+        // Generate and download PDF
+        try {
+            const pdfDoc = pdfMake.createPdf(docDefinition);
+            pdfDoc.download('cobalt-strike-logs.pdf');
+        } catch (error) {
+            console.error('Error generating custom PDF:', error);
+            alert('Error generating PDF: ' + error.message);
+        }
+    };
+    
+    // Add copy functionality for Input/Output buttons
+    function addExcelFriendlyCopySupport() {
+        // Add event handlers for copy buttons
+        $(document).on('click', '.copy-btn.input-btn', function(e) {
+            e.stopPropagation();
+            const cellContent = $(this).closest('td.description-cell').html();
+            copySectionToClipboard(cellContent, 'Input');
+        });
+        
+        $(document).on('click', '.copy-btn.output-btn', function(e) {
+            e.stopPropagation();
+            const cellContent = $(this).closest('td.description-cell').html();
+            copySectionToClipboard(cellContent, 'Output');
+        });
+        
+        // Add visual styling to description cells (no cursor pointer since no cell click)
+        $(document).on('mouseenter', 'td.description-cell', function() {
+            $(this).css({
+                'background-color': 'rgba(0, 123, 255, 0.1)'
+            });
+        });
+        
+        $(document).on('mouseleave', 'td.description-cell', function() {
+            $(this).css({
+                'background-color': ''
+            });
+        });
+    }
+    
+    // Load fonts into pdfMake's virtual file system
+    $(document).ready(function() {
+        // Initialize Excel-friendly copy support
+        addExcelFriendlyCopySupport();
+        
+        if (typeof pdfMake !== 'undefined') {
+            const fontUrls = [
+                '{% static "fonts/pdfmake/Roboto-Regular.ttf" %}',
+                '{% static "fonts/pdfmake/Roboto-Medium.ttf" %}',
+                eventTableConfig.monospaceFontURL
+            ];
+            
+            Promise.all([
+                fetch('{% static "fonts/pdfmake/Roboto-Regular.ttf" %}').then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch Roboto-Regular.ttf: ${response.status} ${response.statusText}`);
+                    }
+                    return response.arrayBuffer();
+                }),
+                fetch('{% static "fonts/pdfmake/Roboto-Medium.ttf" %}').then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch Roboto-Medium.ttf: ${response.status} ${response.statusText}`);
+                    }
+                    return response.arrayBuffer();
+                }),
+                fetch(eventTableConfig.monospaceFontURL).then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch RobotoMono-Regular.ttf: ${response.status} ${response.statusText}`);
+                    }
+                    return response.arrayBuffer();
+                })
+            ]).then(buffers => {
+                const [robotoRegular, robotoMedium, robotoMono] = buffers;
+                
+                // Convert to base64 and add to VFS using a more efficient method
+                function arrayBufferToBase64(buffer) {
+                    const bytes = new Uint8Array(buffer);
+                    let binary = '';
+                    const chunkSize = 8192; // Process in chunks to avoid stack overflow
+                    for (let i = 0; i < bytes.length; i += chunkSize) {
+                        const chunk = bytes.slice(i, i + chunkSize);
+                        binary += String.fromCharCode.apply(null, chunk);
+                    }
+                    return btoa(binary);
+                }
+                
+                const vfsData = {
+                    'Roboto-Regular.ttf': arrayBufferToBase64(robotoRegular),
+                    'Roboto-Medium.ttf': arrayBufferToBase64(robotoMedium),
+                    'RobotoMono-Regular.ttf': arrayBufferToBase64(robotoMono)
+                };
+                
+                pdfMake.vfs = vfsData;
+                
+                // Set up fonts immediately after VFS is loaded
+                pdfMake.fonts = {
+                    RobotoMono: {
+                        normal: 'RobotoMono-Regular.ttf',
+                    },
+                    Roboto: {
+                        normal: 'Roboto-Regular.ttf',
+                        bold: 'Roboto-Medium.ttf',
+                    },
+                };
+                
+                // Set default style to use our fonts
+                if (!pdfMake.defaultStyle) {
+                    pdfMake.defaultStyle = {};
+                }
+                pdfMake.defaultStyle.font = 'Roboto';
+                
+                window.fontsLoaded = true;
+            }).catch(error => {
+                console.error('Error loading fonts:', error);
+                window.fontsLoaded = false;
+            });
+        } else {
+            window.fontsLoaded = false;
+        }
+    });
     </script>
     
     <style nonce="{{request.csp_nonce}}">
     .fa-ul {
         margin-left: 30px; margin-bottom: 0px
+    }
+    
+    /* Copy button styling for description cells */
+    td.description-cell {
+        position: relative;
+        transition: background-color 0.2s ease;
+    }
+    
+    td.description-cell:hover {
+        background-color: rgba(0, 123, 255, 0.1) !important;
+    }
+    
+    /* Dark mode support */
+    @media (prefers-color-scheme: dark) {
+        td.description-cell:hover {
+            background-color: rgba(0, 123, 255, 0.2) !important;
+        }
+    }
+    
+    /* Copy buttons for Input and Output */
+    .copy-buttons {
+        position: absolute;
+        top: 2px;
+        right: 20px;
+        display: flex;
+        gap: 2px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+    
+    td.description-cell:hover .copy-buttons {
+        opacity: 1;
+    }
+    
+    .copy-btn {
+        background: rgba(0, 123, 255, 0.8);
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 2px 4px;
+        font-size: 10px;
+        cursor: pointer;
+        transition: background-color 0.2s ease;
+    }
+    
+    .copy-btn:hover {
+        background: rgba(0, 123, 255, 1);
+    }
+    
+    .copy-btn.input-btn {
+        background: rgba(40, 167, 69, 0.8);
+    }
+    
+    .copy-btn.input-btn:hover {
+        background: rgba(40, 167, 69, 1);
+    }
+    
+    .copy-btn.output-btn {
+        background: rgba(220, 53, 69, 0.8);
+    }
+    
+    .copy-btn.output-btn:hover {
+        background: rgba(220, 53, 69, 1);
     }
 
     table.dataTable tr td:nth-child(6) {
@@ -53,6 +507,43 @@ CS Logs
     
     .more-link {
         white-space: nowrap;
+    }
+    
+    /* Column selection styles */
+    .column-selectable {
+        user-select: text;
+        -webkit-user-select: text;
+        -moz-user-select: text;
+        -ms-user-select: text;
+    }
+    
+    .column-selectable::selection {
+        background-color: #007bff;
+        color: white;
+    }
+    
+    .column-selectable::-moz-selection {
+        background-color: #007bff;
+        color: white;
+    }
+    
+    /* Make table cells selectable */
+    table.dataTable td {
+        user-select: text;
+        -webkit-user-select: text;
+        -moz-user-select: text;
+        -ms-user-select: text;
+    }
+    
+    /* Style for selected text in table cells */
+    table.dataTable td::selection {
+        background-color: #007bff;
+        color: white;
+    }
+    
+    table.dataTable td::-moz-selection {
+        background-color: #007bff;
+        color: white;
     }
     </style>
 {% endblock head %}
@@ -160,14 +651,26 @@ CS Logs
             },
             {
                 text: 'Export PDF',
-                action: pdfExportAction,
-                extend: 'pdfHtml5',  // Required to pull in default config
-                orientation: "landscape",
-                customize: pdfExportCustomize,
-                title: "Cobalt Strike Logs",
-                exportOptions: {
-                    stripNewlines: false,
-                    orthogonal: 'export'  // Force a fresh call to the render function below passing in "export" as the type
+                action: function(e, dt, button, config) {
+                    // Check if fonts are loaded, if not wait for them
+                    if (!window.fontsLoaded) {
+                        const checkFonts = setInterval(() => {
+                            if (window.fontsLoaded) {
+                                clearInterval(checkFonts);
+                                window.generateCustomPDF(dt);
+                            }
+                        }, 100);
+                        return;
+                    }
+                    
+                    // Generate custom PDF
+                    window.generateCustomPDF(dt);
+                }
+            },
+            {
+                text: 'Export CSV',
+                action: function(e, dt, node, config) {
+                    window.location.href = "{% url 'event_tracker:cs-actions-csv' %}";
                 }
             },
           ], 
@@ -182,7 +685,7 @@ CS Logs
             { data: 'operator', orderable: true, width: "6%" },
             { data: 'source', orderable: false, width: "12%" },
             { data: 'target', orderable: false, width: "12%" },
-            { data: 'data', orderable: false, render: descriptionRender, width: "45%" },
+            { data: 'data', orderable: false, render: descriptionRender, width: "45%", className: "description-cell" },
             { data: 'tactic', orderable: true, width: "5%" },
             { data: '', orderable: false, width: "5%" },
           ],
@@ -193,6 +696,23 @@ CS Logs
               normalizeWhitespace: false, 
               detailPrefix: ''
             });
+            
+            // Add copy buttons to description cells
+            $('.table tbody tr td.description-cell').each(function() {
+              if (!$(this).find('.copy-buttons').length) {
+                const cellContent = $(this).html();
+                const copyButtons = `
+                  <div class="copy-buttons">
+                    <button class="copy-btn input-btn" title="Copy Input">In</button>
+                    <button class="copy-btn output-btn" title="Copy Output">Out</button>
+                  </div>
+                `;
+                $(this).append(copyButtons);
+              }
+            });
+            
+            // Add column selection functionality
+            addColumnSelectionSupport();
             
             // Check if we need to highlight a record after page load
             if (jumpToIdTarget) {
@@ -286,6 +806,61 @@ CS Logs
             alert('Error looking up ID ' + targetId);
           }
         });
+      }
+      
+      // Function to add column selection support
+      function addColumnSelectionSupport() {
+        // Add click handlers to table headers for column selection
+        $('.table thead th').each(function(index) {
+          $(this).addClass('column-selectable');
+          $(this).css('cursor', 'pointer');
+          $(this).attr('title', 'Click to select entire column');
+          
+          $(this).on('click', function(e) {
+            e.preventDefault();
+            selectColumn(index);
+          });
+        });
+        
+        // Make all table cells selectable
+        $('.table tbody td').addClass('column-selectable');
+      }
+      
+      // Function to select an entire column
+      function selectColumn(columnIndex) {
+        var columnText = '';
+        var rows = [];
+        
+        // Get all visible rows
+        table.rows({page: 'current'}).every(function() {
+          var rowData = this.data();
+          var cell = $(this.node()).find('td').eq(columnIndex);
+          var cellText = cell.text().trim();
+          
+          if (cellText) {
+            rows.push(cellText);
+            columnText += cellText + '\n';
+          }
+        });
+        
+        // Copy to clipboard
+        if (columnText) {
+          navigator.clipboard.writeText(columnText.trim()).then(function() {
+            // Show a brief success message
+            var header = $('.table thead th').eq(columnIndex);
+            var originalText = header.text();
+            header.text('✓ Copied!');
+            header.css('color', '#28a745');
+            
+            setTimeout(function() {
+              header.text(originalText);
+              header.css('color', '');
+            }, 1500);
+          }).catch(function(err) {
+            console.error('Failed to copy text: ', err);
+            alert('Failed to copy to clipboard. Please select the text manually.');
+          });
+        }
       }
     })
   </script>

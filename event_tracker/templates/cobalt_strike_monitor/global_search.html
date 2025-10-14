@@ -496,9 +496,6 @@ $(document).ready(function() {
                     length: currentLength
                 },
                 success: function(response) {
-                    if (response.debug) {
-                        console.log("DEBUG info from backend:", response.debug);
-                    }
                     if (response.found && response.page) {
                         // Set the target ID to highlight after page load
                         window.jumpToIdTarget = targetId;

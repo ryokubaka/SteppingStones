@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, register_converter
 
 import event_tracker.views_bloodhound
 import event_tracker.views_credentials
@@ -8,7 +8,7 @@ from .views import EventCreateView, EventUpdateView, EventDeleteView, EventListV
     FileAutocomplete, CSBeaconsListView, CSBeaconToEventView, FileListView, TeamServerListView, BeaconExclusionList, \
     BeaconExclusionDeleteView, WebhookListView, WebhookCreateView, WebhookUpdateView, WebhookDeleteView, \
     CSBeaconsTimelineView, beaconwatch_add, beaconwatch_remove, CSDownloadsListView, CSDownloadToEventView, \
-    EventLatMoveCloneView, CSActionListJSON, \
+    EventLatMoveCloneView, CSActionListJSON, CSACtionCSVExportView, \
     UserListAutocomplete, HostListAutocomplete, ProcessListAutocomplete, InitialConfigTask, InitialConfigAdmin, \
     toggle_event_star, EventTagAutocomplete, TeamServerConfigView, EventStreamListView, EventStreamListJSON, EventStreamUpload, \
     EventStreamToEventView, toggle_qs_stars, LimitedEventUpdateView, EventBulkEdit, \
@@ -17,7 +17,10 @@ from .views_bloodhound import BloodhoundServerListView, BloodhoundServerCreateVi
     BloodhoundServerDeleteView
 from .views_credentials import CredentialListView, CredentialListJson, CredentialCreateView, CredentialUpdateView, \
     CredentialDeleteView, credential_wordlist, prefix_wordlist, suffix_wordlist, credential_uncracked_hashes, credential_masklist, prefix_masklist, suffix_masklist
+from .converters import NegativeIntConverter
 
+# Register the custom converter
+register_converter(NegativeIntConverter, 'negint')
 app_name = "event_tracker"
 urlpatterns = [
     path('', views.index, name='index'),
@@ -47,6 +50,7 @@ urlpatterns = [
     path('<int:task_id>/creds/masklist/<int:min_len>', credential_masklist, name='credential-masklist'),
     path('<int:task_id>/creds/masklist/prefixes', prefix_masklist, name='prefix-masklist'),
     path('<int:task_id>/creds/masklist/suffixes', suffix_masklist, name='suffix-masklist'),
+    path('<int:task_id>/creds/hashes/<negint:hash_type>', credential_uncracked_hashes, name='credential-uncracked-hashes'),
     path('<int:task_id>/creds/hashes/<int:hash_type>', credential_uncracked_hashes, name='credential-uncracked-hashes'),
     path('<int:task_id>/creds/hashes/pwdump', event_tracker.views_credentials.credential_uncracked_hashes_pwdump, name='credential-uncracked-hashes-pwdump'),
     path('<int:task_id>/creds/hashes/cracked', event_tracker.views_credentials.UploadCrackedHashes.as_view(), name='credential-cracked-hashes-upload'),
@@ -77,6 +81,7 @@ urlpatterns = [
 
     path('cs-actions', CSActionListView.as_view(), name='cs-actions-list'),
     path('cs-actions-api', CSActionListJSON.as_view(), name='cs-actions-json'),
+    path('cs-actions/csv', CSACtionCSVExportView.as_view(), name='cs-actions-csv'),
     path('cs-logs/<int:pk>/to_event/', CSLogToEventView.as_view(), name="cs-log-to-event"),
     path('cs-uploads', CSUploadsListView.as_view(), name='cs-uploads-list'),
     path('cs-downloads', CSDownloadsListView.as_view(), name='cs-downloads-list'),

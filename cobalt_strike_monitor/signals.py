@@ -100,37 +100,110 @@ def checkin_handler(sender, beacon, metadata, **kwargs):
 def beaconlog_action_correlator(sender, instance: BeaconLog, **kwargs):
     # We dump the beacon log before the archives, so use beacon logs to determine when to start new actions.
 
-    if instance.cs_action:
-        #We have already processed this BeaconLog
+    # IMPORTANT:
+    # Use the *_id field as the guard, not instance.cs_action. The related
+    # object may not be loaded, so instance.cs_action can be falsy even when
+    # cs_action_id is already set. If we don't check the ID directly, we end
+    # up creating duplicate CSAction entries every time this BeaconLog is
+    # saved again.
+    if getattr(instance, "cs_action_id", None):
+        # We have already processed / correlated this BeaconLog
+        # logger.debug(f"[CORRELATOR] BeaconLog already has cs_action_id={instance.cs_action_id}, skipping")
         return
+    
+    # Additional safety check: if this is an existing instance (has pk), check the database
+    # to see if it already has a cs_action_id set. This prevents duplicate actions when
+    # the same BeaconLog is saved multiple times.
+    if instance.pk:
+        try:
+            existing_log = BeaconLog.objects.using(using).get(pk=instance.pk)
+            if existing_log.cs_action_id:
+                # logger.info(f"[CORRELATOR] BeaconLog {instance.pk} already has cs_action_id={existing_log.cs_action_id} in DB, using it")
+                instance.cs_action_id = existing_log.cs_action_id
+                return
+        except BeaconLog.DoesNotExist:
+            pass  # New instance, continue with correlation
 
-    # If there's an input, it will always signify the start of a new action
-    if instance.type == "input":
-        new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
+    # Determine which database to use - check if instance was saved with .using()
+    # When using .create(using='active_op_db') or .save(using='active_op_db'),
+    # Django sets instance._state.db before the signal fires
+    using = getattr(instance._state, 'db', None)
+    if using is None:
+        # Fallback: cobalt_strike_monitor models should use active_op_db
+        # since they're operation-specific
+        using = 'active_op_db'
 
-        # When commands are run in quick succession the output can get assigned to the wrong action. There are some
-        # commands which we know won't product output, and therefore we can defend against this a bit
-        if instance.data.startswith("sleep ") or instance.data.startswith("note "):
-            new_action.accept_output = False
-
-        new_action.save()
-        instance.cs_action_id = new_action.pk
-
-    # A task with no input log within the last second, relating to sleep, is also the start of a new action
-    elif instance.type == "task" and "Tasked beacon to sleep " in instance.data and\
-            not CSAction.objects.filter(beacon__pk=instance.beacon.pk, start__gte=instance.when - timedelta(seconds=1), start__lte=instance.when).exists():
-        new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
-        new_action.save()
-        instance.cs_action_id = new_action.pk
-        instance.accept_output = False
-
-    # For everything else, associate it with the most recent action on the beacon
+    # If task_id is present (Cobalt Strike 4.12+), use it *exclusively* for correlation.
+    # This ensures that when task_ids exist, we don't fall back to timing-based guesses
+    # which can mis-assign outputs when many commands are run in a single check-in.
+    if instance.task_id:
+        # CRITICAL: Always check for an existing CSAction with this task_id first,
+        # regardless of log type. This prevents duplicate actions when the same task_id
+        # appears in multiple logs (e.g., input + task, or duplicate processing).
+        # We look for actions that have ANY BeaconLog with the same task_id.
+        # logger.info(f"[CORRELATOR] Processing {instance.type} with task_id={instance.task_id} for beacon {instance.beacon.pk}")
+        existing_action = CSAction.objects.using(using).filter(
+            beacon__pk=instance.beacon.pk,
+            beaconlog__task_id=instance.task_id
+        ).distinct().first()
+        
+        if existing_action:
+            # Found an existing action with the same task_id, associate this log with it
+            # logger.info(f"[CORRELATOR] ✓ Found existing CSAction {existing_action.pk} for task_id={instance.task_id}, associating {instance.type}")
+            instance.cs_action_id = existing_action.pk
+        elif instance.type == "input" or instance.type == "task":
+            # This is an input or task log with a task_id, and no existing action found.
+            # Create a new action for it.
+            # Note: The log will be saved with this action, so future output logs with the same
+            # task_id will be able to find this action via the beaconlog__task_id query above
+            # logger.info(f"[CORRELATOR] ✗ No existing CSAction found for task_id={instance.task_id}, creating new one for {instance.type}")
+            new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
+            # When commands are run in quick succession the output can get assigned to the wrong action. There are some
+            # commands which we know won't product output, and therefore we can defend against this a bit
+            if instance.data.startswith("sleep ") or instance.data.startswith("note ") or \
+               instance.data.startswith("Tasked beacon to sleep ") or instance.data.startswith("Tasked beacon to become interactive"):
+                new_action.accept_output = False
+            new_action.save(using=using)
+            instance.cs_action_id = new_action.pk
+            # logger.info(f"[CORRELATOR] ✓ Created CSAction {new_action.pk} for task_id {instance.task_id} ({instance.type})")
+        else:
+            # This is an output / error / note / checkin with a task_id but no matching action yet.
+            # We deliberately do NOT fall back to timing-based correlation here; if the task/input
+            # log hasn't been seen yet, we prefer to leave this BeaconLog uncorrelated rather than
+            # risk attaching it to the wrong CSAction.
+            # logger.warning(
+            #     f"[CORRELATOR] ✗ {instance.type} with task_id={instance.task_id} has no matching CSAction; "
+            #     f"leaving cs_action unset (input/task log may not have been processed yet)"
+            # )
+            pass
     else:
-        most_recent_action_query = CSAction.objects.filter(beacon__pk=instance.beacon.pk, start__lte=instance.when).order_by(
-            "-start")
-        if instance.type.startswith("output") or instance.type == "error":
-            most_recent_action_query = most_recent_action_query.filter(accept_output=True)
-        instance.cs_action_id = most_recent_action_query.values_list("id", flat=True).first()
+        # No task_id present, use backwards-compatible timing-based correlation
+        # If there's an input, it will always signify the start of a new action
+        if instance.type == "input":
+            new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
+
+            # When commands are run in quick succession the output can get assigned to the wrong action. There are some
+            # commands which we know won't product output, and therefore we can defend against this a bit
+            if instance.data.startswith("sleep ") or instance.data.startswith("note "):
+                new_action.accept_output = False
+
+            new_action.save(using=using)
+            instance.cs_action_id = new_action.pk
+
+        # A task with no input log within the last second, relating to sleep, is also the start of a new action
+        elif instance.type == "task" and "Tasked beacon to sleep " in instance.data and\
+                not CSAction.objects.using(using).filter(beacon__pk=instance.beacon.pk, start__gte=instance.when - timedelta(seconds=1), start__lte=instance.when).exists():
+            new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
+            new_action.save(using=using)
+            instance.cs_action_id = new_action.pk
+
+        # For everything else, associate it with the most recent action on the beacon
+        else:
+            most_recent_action_query = CSAction.objects.using(using).filter(beacon__pk=instance.beacon.pk, start__lte=instance.when).order_by(
+                "-start")
+            if instance.type.startswith("output") or instance.type == "error":
+                most_recent_action_query = most_recent_action_query.filter(accept_output=True)
+            instance.cs_action_id = most_recent_action_query.values_list("id", flat=True).first()
 
 
 @receiver(pre_save, sender=Archive)
@@ -139,6 +212,15 @@ def archive_action_correlator(sender, instance: Archive, **kwargs):
         # Can occur for webhits or notify types, nothing to do, so exit early
         return
 
-    most_recent_action_id = CSAction.objects.filter(beacon__pk=instance.beacon.pk, start__lte=instance.when).order_by(
+    # Determine which database to use - check if instance was saved with .using()
+    # When using .create(using='active_op_db') or .save(using='active_op_db'),
+    # Django sets instance._state.db before the signal fires
+    using = getattr(instance._state, 'db', None)
+    if using is None:
+        # Fallback: cobalt_strike_monitor models should use active_op_db
+        # since they're operation-specific
+        using = 'active_op_db'
+
+    most_recent_action_id = CSAction.objects.using(using).filter(beacon__pk=instance.beacon.pk, start__lte=instance.when).order_by(
         "-start").values_list("id", flat=True).first()
     instance.cs_action_id = most_recent_action_id

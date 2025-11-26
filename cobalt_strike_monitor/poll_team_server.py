@@ -555,7 +555,8 @@ def parse_line(line):
     """
     line_parts = re.search(r"^\[.\] \[([^\]]+)\] (.*)$", line)
     if not line_parts:
-        logger.debug(f"Could not parse: {line}")
+        # For non-data lines (status, debug, etc.) just log at debug level
+        logger.debug(f"[PARSER] Could not parse line into ID/JSON: {line}")
         return None, None
     return line_parts.group(1), json.loads(line_parts.group(2))
 
@@ -602,6 +603,11 @@ def parse(p, server):
                     continue
 
                 logger.debug(f"[PARSER] Successfully parsed line with ID: {line_id}")
+                # Log the raw line for beacon logs to debug task_id extraction
+                if line.startswith("[B]"):
+                    logger.info(f"[PARSER] ===== RAW BEACON LOG LINE =====")
+                    logger.info(f"[PARSER] Full line: {line}")
+                    logger.info(f"[PARSER] ================================")
 
                 # First, lets flush the pending Beacon Log if we've moved onto a processing different type of line:
                 if not line.startswith("[B]"):
@@ -685,15 +691,40 @@ def parse(p, server):
                     archive.save()
                     logger.debug(f"[PARSER] Saved Archive: {archive.id}")
                 elif line.startswith("[B]"):  # Beacon Logs
-                    logger.debug("[PARSER] Processing Beacon Log")
-                    # Example:
-                    # [B] [1263] {"data":"received output:\n[+] roborg Runtime Initalized, assembly size 488960, .NET Runtime Version: 4.0.30319.42000 in AppDomain qiBsaBzIc\r\n", "type":"beacon_output", "bid":"270632664", "when":"1741168779890"}
-                    # To avoid hammering the DB and rerunning lots of regexes, we first try and buffer sequential output
-                    # logs in memory, but this only works for those logs read in a single non-blocking read, so
-                    # eventually we also have to attempt a DB level merge too.
-                    beacon_log = BeaconLog(**dict(filter(
-                        lambda elem: elem[0] in ["data", "operator", "output_job"],
-                        line_data.items())))
+                    # logger.info("[PARSER] ===== PROCESSING BEACON LOG =====")
+                    # logger.info(f"[PARSER] Line ID: {line_id}")
+                    # logger.info(f"[PARSER] Parsed JSON keys: {list(line_data.keys())}")
+                    # logger.info(f"[PARSER] Full parsed JSON data: {line_data}")
+                    # logger.info(f"[PARSER] Type: {line_data.get('type')}")
+                    
+                    # Check for task_id in the parsed data
+                    # if "task_id" in line_data:
+                    #     task_id_value = line_data.get('task_id')
+                    #     logger.info(f"[PARSER] ✓ task_id FOUND in parsed JSON: '{task_id_value}' (Python type: {type(task_id_value).__name__})")
+                    #     logger.info(f"[PARSER] task_id value repr: {repr(task_id_value)}")
+                    #     logger.info(f"[PARSER] task_id is None: {task_id_value is None}")
+                    #     logger.info(f"[PARSER] task_id == '': {task_id_value == ''}")
+                    # else:
+                    #     logger.warning(f"[PARSER] ✗ task_id NOT FOUND in parsed JSON keys!")
+                    #     logger.warning(f"[PARSER] Available keys: {list(line_data.keys())}")
+                    
+                    # Filter to only include non-None values for task_id, but include all for other fields
+                    filtered_data = {}
+                    for key, value in line_data.items():
+                        if key in ["data", "operator", "output_job"]:
+                            filtered_data[key] = value
+                            # logger.debug(f"[PARSER] Added {key} to filtered_data")
+                        elif key == "task_id":
+                            if value is not None and value != "":
+                                filtered_data[key] = value
+                                # logger.info(f"[PARSER] ✓ Including task_id in filtered_data: '{value}'")
+                            # else:
+                            #     logger.warning(f"[PARSER] ✗ Excluding task_id from filtered_data (value: {repr(value)})")
+                    
+                    # logger.info(f"[PARSER] Filtered data keys: {list(filtered_data.keys())}")
+                    # logger.info(f"[PARSER] Filtered data: {filtered_data}")
+                    beacon_log = BeaconLog(**filtered_data)
+                    # logger.info(f"[PARSER] BeaconLog object created. task_id attribute: {getattr(beacon_log, 'task_id', 'NOT SET')}")
 
                     beacon_log.type = clean_type(line_data["type"])
                     try:
@@ -706,6 +737,7 @@ def parse(p, server):
                     # Work back from the end of line_data, as there may (or may not) be an operator element in the
                     # middle which messes up later offsets
                     beacon_log.when = datetime.fromtimestamp(int(line_data["when"]) / 1000, tz=UTC)
+                    # logger.info(f"[PARSER] After setting when, beacon_log.task_id = {getattr(beacon_log, 'task_id', 'NOT SET')}")
 
                     if "data" in line_data:
                         # Trim prefix added by NCC custom tooling
@@ -720,31 +752,61 @@ def parse(p, server):
                     # So there remains the need to do additional processing to collate the output/errors associated with an input/task.
                     if pending_beacon_log:
                         # Does current entry fit with pending beacon log?
+                        # CRITICAL: Don't merge if task_id is present and differs between the two logs
+                        # This ensures outputs for different commands don't get merged together
+                        task_ids_match = True
+                        if pending_beacon_log.task_id and beacon_log.task_id:
+                            # Both have task_id - they must match to merge
+                            task_ids_match = (pending_beacon_log.task_id == beacon_log.task_id)
+                        elif pending_beacon_log.task_id or beacon_log.task_id:
+                            # One has task_id and the other doesn't - don't merge
+                            task_ids_match = False
+                        
                         if beacon_log.type == pending_beacon_log.type and \
                                 beacon_log.output_job == pending_beacon_log.output_job and \
                                 beacon_log.beacon_id == pending_beacon_log.beacon_id and \
                                 beacon_log.team_server_id == pending_beacon_log.team_server_id and \
-                                beacon_log.when - pending_beacon_log.when <= timedelta(milliseconds=15):
+                                beacon_log.when - pending_beacon_log.when <= timedelta(milliseconds=15) and \
+                                task_ids_match:
                             # Merge current with pending and discard current
-                            logger.debug("[PARSER] Merging beacon log with pending log")
+                            # logger.info(f"[PARSER] Merging beacon log with pending log")
+                            # logger.info(f"[PARSER] Current task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}, Pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log.data += beacon_log.data
                             pending_beacon_log.when = beacon_log.when # Update the time for use in subsequent time comparisons
-                        else:
-                            # Flush pending beacon log and save current one
-                            logger.debug("[PARSER] Flushing pending beacon log and saving new log")
-                            # Our regexes rely on a \n to find ends of passwords etc, so ensure there's always 1
+                            # Preserve task_id if present in current log but not in pending
+                            if beacon_log.task_id and not pending_beacon_log.task_id:
+                                pending_beacon_log.task_id = beacon_log.task_id
+                                # logger.info(f"[PARSER] Preserved task_id from current log: {beacon_log.task_id}")
+                            # logger.info(f"[PARSER] After merge, pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                        elif not task_ids_match:
+                            # Task IDs don't match - flush pending and save current separately
+                            # logger.info(f"[PARSER] Task IDs differ - flushing pending and saving current separately")
+                            # logger.info(f"[PARSER] Pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}, Current task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log.data = pending_beacon_log.data.rstrip("\n") + "\n"
                             pending_beacon_log.save()
                             pending_beacon_log = None
                             beacon_log.save()
+                        else:
+                            # Flush pending beacon log and save current one
+                            # logger.info(f"[PARSER] Flushing pending beacon log and saving new log")
+                            # logger.info(f"[PARSER] Pending task_id before save: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                            # Our regexes rely on a \n to find ends of passwords etc, so ensure there's always 1
+                            pending_beacon_log.data = pending_beacon_log.data.rstrip("\n") + "\n"
+                            pending_beacon_log.save()
+                            # logger.info(f"[PARSER] Saved pending beacon log with task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                            pending_beacon_log = None
+                            # logger.info(f"[PARSER] Current task_id before save: {getattr(beacon_log, 'task_id', 'NOT SET')}")
+                            beacon_log.save()
+                            # logger.info(f"[PARSER] Saved current beacon log with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                     else:
                         if beacon_log.type == "output":
-                            logger.debug("[PARSER] Setting new pending beacon log")
+                            # logger.info(f"[PARSER] Setting new pending beacon log with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log = beacon_log
                         else:
                             # There's no pending beacon log, just save this non-output log straight to the DB
-                            logger.debug("[PARSER] Saving non-output beacon log directly")
+                            # logger.info(f"[PARSER] Saving non-output beacon log directly with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             beacon_log.save()
+                            # logger.info(f"[PARSER] Saved beacon log. After save, task_id in DB should be: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                 elif line.startswith("[C]"):  # Credentials
                     logger.debug("[PARSER] Processing Credential")
                     credential = Credential(**dict(filter(

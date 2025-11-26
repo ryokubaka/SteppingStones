@@ -313,6 +313,7 @@ class BeaconLog(models.Model):
     type = models.CharField(max_length=25)  # One of: input, task, checkin, output, output_ps, error, note, indicator, output_job_registered, output_job_completed
     data = models.TextField()  # The content of the log
     output_job = models.IntegerField(null=True)
+    task_id = models.CharField(max_length=100, null=True, blank=True)  # Task ID from Cobalt Strike 4.12+ for correlating commands with outputs
 
     operator = models.CharField(max_length=100, null=True)  # The user initiating the request
     cs_action = ForeignKey(CSAction, on_delete=models.CASCADE, null=True)

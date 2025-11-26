@@ -186,14 +186,6 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
-# File upload settings - allow large database file imports
-# Maximum size of request body (2GB)
-DATA_UPLOAD_MAX_MEMORY_SIZE = 2147483648  # 2GB in bytes
-# Maximum size of file uploads (2GB)
-FILE_UPLOAD_MAX_MEMORY_SIZE = 2147483648  # 2GB in bytes
-# Maximum number of request parameters
-DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
-
 # Default primary key field type
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
 

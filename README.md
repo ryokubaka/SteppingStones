@@ -101,7 +101,7 @@ Enhanced navigation and contextual awareness features:
 - **Jump to ID**: Quickly navigate to specific log entries by entering their ID number. This feature is available in both the CS Logs and Global Search views.
 - **Visual Highlighting**: Target records are automatically highlighted and scrolled into view when using jump-to-ID functionality.
 
-These features help maintain proper context when reviewing Cobalt Strike logs. With Cobalt Strike 4.12+, task correlation is handled automatically using `task_id` (see [Task Correlation](#task-correlation-cobalt-strike-412) section). For older versions or when reviewing historical data, the jump-to-ID feature helps verify and manually correlate commands with their outputs.
+These features help maintain proper context when reviewing Cobalt Strike logs and ensure accurate correlation between commands and their outputs. Execution of multiple tasks in a single check-in will result in beacon output correlating to the incorrect task, but with this feature, you can easily jump to a task ID and correlate the output with surrounding tasks.
 
 ---
 
@@ -232,69 +232,6 @@ There are additional CLI commands which can be used if SSBot is not working as i
 
 * `.\manage.py reset_cs_data [-s SERVER]` - Will reset any data parsed from the given team server, or all if no name is given. This will not affect data derived from the CS logs, e.g. manually cloned events or credentials.
 * `.\manage.py parse_log_tar <file name>` - Will parse the contents of a logs directory, tar'ed up and taken from a team server. Note: this does not include all of the data accessible by SSBot and is therefore not the preferred ingest technique
-
-### Task Correlation (Cobalt Strike 4.12+)
-
-Stepping Stones supports accurate correlation between Cobalt Strike commands and their outputs using the `task_id` feature introduced in Cobalt Strike 4.12. The system maintains full backwards compatibility with older Cobalt Strike versions that do not provide `task_id`.
-
-#### How It Works
-
-**Cobalt Strike 4.12+ (with `task_id`):**
-- Each command issued to a beacon is assigned a unique `task_id` by Cobalt Strike
-- The same `task_id` appears in both the input/task log entry and all corresponding output/error log entries
-- Stepping Stones uses this `task_id` to accurately correlate commands with their outputs
-- This ensures that even when multiple commands are sent in a single check-in, each command's output is correctly associated with its specific input
-- The correlation is deterministic and does not rely on timing, eliminating mis-correlation issues
-
-**Pre-4.12 Versions (without `task_id`):**
-- The system falls back to timing-based correlation
-- Commands and outputs are matched based on their timestamps and the order in which they appear
-- This method works well for sequential commands but can mis-correlate when multiple commands are executed in quick succession
-
-#### Technical Implementation
-
-The task correlation logic is implemented in several key components:
-
-1. **Data Extraction (`cobalt_strike_monitor/templates/dump.cna`):**
-   - The Aggressor script extracts `task_id` from Cobalt Strike's `beaconlog` data
-   - The `task_id` is included in the JSON output for all relevant log types (input, task, output, error, etc.)
-   - The 6th element of each beaconlog array contains the `task_id` (when present)
-
-2. **Data Parsing (`cobalt_strike_monitor/poll_team_server.py`):**
-   - The Python parser extracts `task_id` from the JSON data and stores it in the `BeaconLog` model
-   - Output logs with different `task_id` values are prevented from being merged together
-   - This ensures that outputs for different commands remain separate even when they arrive in the same poll cycle
-
-3. **Action Correlation (`cobalt_strike_monitor/signals.py`):**
-   - The `beaconlog_action_correlator` signal handler processes each `BeaconLog` entry before it's saved
-   - When `task_id` is present:
-     - The system first checks for an existing `CSAction` that has any `BeaconLog` with the same `task_id`
-     - If found, the current log is associated with that existing action
-     - If not found and the log is an input/task type, a new `CSAction` is created
-     - If not found and the log is an output/error type, it's left uncorrelated (the input may not have been processed yet)
-   - When `task_id` is absent (older versions):
-     - The system uses timing-based correlation
-     - Input logs create new actions
-     - Output logs are associated with the most recent action that accepts output
-
-4. **Database Schema:**
-   - The `BeaconLog` model includes a `task_id` field (`CharField`, nullable)
-   - The `CSAction` model represents a correlated command and its outputs
-   - Each `BeaconLog` can be linked to a `CSAction` via the `cs_action` foreign key
-
-#### Benefits
-
-- **Accuracy**: Commands and outputs are always correctly correlated when `task_id` is available
-- **Reliability**: No mis-correlation when multiple commands are executed in a single check-in
-- **Backwards Compatibility**: Older Cobalt Strike versions continue to work with timing-based correlation
-- **Automatic**: The system automatically detects and uses `task_id` when available, requiring no configuration
-
-#### Display on cs-actions Page
-
-The `cs-actions` webpage displays each command as a separate row, with its corresponding output correctly associated. When multiple commands are sent in a single check-in:
-- Each command appears as its own row
-- Each row shows only the output for that specific command
-- Outputs are correctly separated even when they arrive in the same response from Cobalt Strike
 
 ## BloodHound Integration
 

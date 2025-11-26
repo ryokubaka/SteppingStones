@@ -74,7 +74,6 @@ on beacons {
    $last_session_obj = dumpmodelarraysofhashes("[S]", data_query("sessions"), &session_sorter, &session_filter);
    if ($last_session_obj) { $last_session = parseNumber($last_session_obj["opened"]); }
 
-   # Convert the beaconlog array-of-arrays into an array-of-hashes
    $beaconloghashes = convertbeaconlogtohashes(data_query("beaconlog"));
    $last_beaconlog_obj = dumpmodelarraysofhashes("[B]", $beaconloghashes, $null, &beaconlog_filter);
    if ($last_beaconlog_obj) { $last_beaconlog = parseNumber($last_beaconlog_obj["when"]); }
@@ -98,22 +97,14 @@ sub convertbeaconlogtohashes {
     @result = @();
     foreach $index => $entry ($1) {
         if ($entry[0] eq "beacon_input") {
-            # Cobalt Strike 4.12+ beacon_input:
-            #   (type, bid, operator, data, when, task_id)
-            # Map all six fields, including task_id.
-            putAll(%hash, @("type", "bid", "operator", "data", "when", "task_id"), $entry);
+            putAll(%hash, @("type", "bid", "operator", "data", "when"), $entry);
         }
         else if ($entry[0] eq "beacon_output_job_registered" || $entry[0] eq "beacon_output_job_completed") {
-            # Cobalt Strike 4.12+ beacon_output_job_*:
-            #   (type, bid, output_job, when, task_id)
-            putAll(%hash, @("type", "bid", "output_job", "when", "task_id"), $entry);
+            putAll(%hash, @("type", "bid", "output_job", "when"), $entry);
         }
         else {
-            # Cobalt Strike 4.12+:
-            #   beacon_tasked / beacon_output / beacon_output_alt / beacon_error / beacon_note / beacon_checkin
-            #   (type, bid, data, when, output_job, task_id)
-            # For types that don't naturally have an output_job (e.g. beacon_checkin) the 5th element is $null.
-            putAll(%hash, @("type", "bid", "data", "when", "output_job", "task_id"), $entry);
+            # Must be beacon_output, beacon_error, beacon_note, beacon_checkin, beacon_tasked
+            putAll(%hash, @("type", "bid", "data", "when", "output_job"), $entry);
         }
         push(@result, copy(%hash));
         clear(%hash);
@@ -147,9 +138,7 @@ sub dumpmodelarraysofhashes {
         foreach $index => $entry ($subarray) {
             print("$1 [" . ($index) . "] ");
 
-            # Get all keys including task_id if present
-            @all_keys = keys($entry);
-            foreach $key(@all_keys)
+            foreach $key(keys($entry))
             {
                $value = $entry[$key];
                cleanvalue($value);

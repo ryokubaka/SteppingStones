@@ -14,8 +14,9 @@ services:
       DJANGO_ALLOWED_HOSTS: "*"
     command: >
       sh -c "
-        python manage.py makemigrations background_task event_tracker cobalt_strike_monitor &&
+        python manage.py makemigrations background_task &&
         python manage.py migrate &&
+        python manage.py migrate_all_ops &&
         python manage.py runserver 0.0.0.0:8000 --insecure
       "
     restart: always

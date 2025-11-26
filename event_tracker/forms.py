@@ -200,12 +200,7 @@ class ImportOperationForm(forms.Form):
         help_text="A user-friendly display name for the operation (e.g., 'Operation Alpha - Q1 2024')."
     )
     db_file = forms.FileField(
-        required=False,
         help_text="Select a SQLite3 database file to import as the operation database."
-    )
-    json_file = forms.FileField(
-        required=False,
-        help_text="Select a JSON file containing Cobalt Strike beacon logs to import. This will create a new database from the JSON data."
     )
 
     def clean_name(self):
@@ -219,21 +214,6 @@ class ImportOperationForm(forms.Form):
             raise forms.ValidationError("An operation with this name already exists.")
         return name
 
-    def clean(self):
-        cleaned_data = super().clean()
-        db_file = cleaned_data.get('db_file')
-        json_file = cleaned_data.get('json_file')
-        
-        # Require at least one file
-        if not db_file and not json_file:
-            raise forms.ValidationError("Please provide either a SQLite database file or a JSON file to import.")
-        
-        # Don't allow both files
-        if db_file and json_file:
-            raise forms.ValidationError("Please provide either a SQLite database file OR a JSON file, not both.")
-        
-        return cleaned_data
-    
     def clean_db_file(self):
         db_file = self.cleaned_data.get('db_file')
         if db_file:
@@ -266,23 +246,3 @@ class ImportOperationForm(forms.Form):
             except sqlite3.Error as e:
                 raise forms.ValidationError(f"Invalid SQLite database file: {str(e)}")
         return db_file
-    
-    def clean_json_file(self):
-        json_file = self.cleaned_data.get('json_file')
-        if json_file:
-            if not json_file.name.endswith('.json'):
-                raise forms.ValidationError("The uploaded file must be a JSON file (.json)")
-            try:
-                # Validate JSON structure
-                import json
-                json_file.seek(0)  # Reset file pointer
-                data = json.load(json_file)
-                json_file.seek(0)  # Reset again for later use
-                
-                if 'data' not in data:
-                    raise forms.ValidationError("JSON file must have a 'data' key containing an array of log entries.")
-                if not isinstance(data['data'], list):
-                    raise forms.ValidationError("JSON file 'data' key must contain an array.")
-            except json.JSONDecodeError as e:
-                raise forms.ValidationError(f"Invalid JSON file: {str(e)}")
-        return json_file

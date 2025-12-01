@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, register_converter
 
 import event_tracker.views_bloodhound
 import event_tracker.views_credentials

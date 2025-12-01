@@ -55,38 +55,45 @@ def cs_beacon_to_context(sender, instance: Beacon, **kwargs):
 
 @receiver(post_save, sender=cobalt_strike_monitor.models.Credential)
 def cs_credential_listener(sender, instance: cobalt_strike_monitor.models.Credential, **kwargs):
+    # Note: This handles cobalt_strike_monitor.models.Credential, not event_tracker.models.Credential
+    # The cobalt_strike_monitor Credential is already operation-specific via team_server
     if len(instance.password) > 50 or re.fullmatch("[0-9a-f]{16,}", instance.password, flags=re.IGNORECASE):
         # The "password" in CS looks like a hash
-
         if len(instance.password) == 32:
             # Looks like a NTLM hash
             hash_type = HashCatMode.NTLM
-            credential, created = Credential.objects.get_or_create(
-                system=instance.realm,
-                account=instance.user,
-                hash=instance.password,
-                hash_type=hash_type,
-                purpose="Windows Login"
-            )
+            create_kwargs = {
+                'system': instance.realm,
+                'account': instance.user,
+                'hash': instance.password,
+                'hash_type': hash_type,
+                'purpose': "Windows Login"
+            }
+            # Don't set operation - credentials are scoped by database (active_op_db)
+            credential, created = Credential.objects.using('active_op_db').get_or_create(**create_kwargs)
         else:
             # Couldn't determine hash type
-            credential, created = Credential.objects.get_or_create(
-                system=instance.realm,
-                account=instance.user,
-                hash=instance.password
-            )
+            create_kwargs = {
+                'system': instance.realm,
+                'account': instance.user,
+                'hash': instance.password
+            }
+            # Don't set operation - credentials are scoped by database (active_op_db)
+            credential, created = Credential.objects.using('active_op_db').get_or_create(**create_kwargs)
     else:
         # The "password" in CS is probably truly a password
-        credential, created = Credential.objects.get_or_create(
-            system=instance.realm,
-            account=instance.user,
-            secret=instance.password
-        )
+        create_kwargs = {
+            'system': instance.realm,
+            'account': instance.user,
+            'secret': instance.password
+        }
+        # Don't set operation - credentials are scoped by database (active_op_db)
+        credential, created = Credential.objects.using('active_op_db').get_or_create(**create_kwargs)
 
     if created:
         credential.source = f"{instance.source} {instance.host}"
         credential.source_time = instance.added
-        credential.save()
+        credential.save(using='active_op_db')
 
     return credential
 
@@ -109,16 +116,59 @@ def cs_beaconlog_parser(sender, instance: BeaconLog, **kwargs):
         cs_indicator_archive_to_file(instance.data)
     elif instance.type == "output":
         message = instance.data
-        extract_creds(message, default_system=instance.beacon.computer)
+        # Try to get operation from the beacon's team_server's operation
+        # During import, we can infer the operation from the database being used
+        operation = None
+        try:
+            # Check if this is from an operation database by looking at the team_server
+            # The team_server should have a connection to an operation
+            from event_tracker.models import Operation
+            from django.db import connections
+            
+            # Try to get operation from active_op_db context
+            try:
+                from event_tracker.background_tasks import get_current_active_operation
+                operation = get_current_active_operation()
+            except (ImportError, AttributeError):
+                pass
+            
+            # If that didn't work, try to infer from the database connection
+            if not operation:
+                # Check if we're using active_op_db and can infer the operation
+                db_name = connections.databases.get('active_op_db', {}).get('NAME', '')
+                if db_name and 'ops-data' in str(db_name):
+                    # Extract operation name from database path (e.g., /path/to/ops-data/2023-0004.sqlite3)
+                    import os
+                    db_basename = os.path.basename(str(db_name))
+                    if db_basename.endswith('.sqlite3'):
+                        op_name = db_basename[:-8]  # Remove .sqlite3 extension
+                        try:
+                            operation = Operation.objects.using('default').get(name=op_name)
+                        except Operation.DoesNotExist:
+                            pass
+        except Exception:
+            # If anything fails, just continue without operation
+            pass
+        
+        extract_creds(message, default_system=instance.beacon.computer, operation=operation)
 
 
-def extract_creds(input_text: str, default_system: str):
+def extract_creds(input_text: str, default_system: str, operation=None):
     # Remove CS timestamps
     input_text = re.sub(r'\r?\n\[\d\d\/\d\d \d\d:\d\d:\d\d] \[\+] ', '', input_text)
     # Remove inline execute assembly output noise
     input_text = re.sub(r'received output:\r?\n', '', input_text)
 
-    return extract_and_save(input_text, default_system)
+    # If operation not provided, try to get current operation
+    if operation is None:
+        try:
+            from event_tracker.background_tasks import get_current_active_operation
+            operation = get_current_active_operation()
+        except (ImportError, AttributeError):
+            # Fallback if import fails (e.g., during migrations)
+            pass
+
+    return extract_and_save(input_text, default_system, operation=operation)
 
 
 @receiver(post_save, sender=Beacon)

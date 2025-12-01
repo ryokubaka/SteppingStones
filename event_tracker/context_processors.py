@@ -9,7 +9,7 @@ def operations_list_processor(request):
 
     if request.user.is_authenticated:
         try:
-            operations = list(Operation.objects.using(DEFAULT_DB_ALIAS).order_by('display_name'))
+            operations = list(Operation.objects.using(DEFAULT_DB_ALIAS).order_by('name'))
             if active_operation_name_session:
                 # Get the display name of the active operation
                 active_op_obj = next((op for op in operations if op.name == active_operation_name_session), None)

@@ -46,7 +46,7 @@ class RubeusKerberoastExtractor(CredentialExtractor):
             # Remove any similar but truncated hashes which haven't cracked, these are a result of stream processing kicking
             # in before the multiline kerberos ticket has been fully parsed from CS logs
             CharField.register_lookup(Length)
-            credentials_to_remove = list(Credential.objects.filter(account=match.groupdict()["account"],
+            credentials_to_remove = list(Credential.objects.using('active_op_db').filter(account=match.groupdict()["account"],
                                       hash_type=hash_type, system=match.groupdict()["system"] or default_system,
                                       purpose=f"Windows Login (used by SPN: {match.groupdict()['purpose'].strip()})",
                                       source="Rubeus Kerberoasting") \

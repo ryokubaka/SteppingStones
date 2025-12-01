@@ -58,81 +58,11 @@ class TeamServerPoller:
         self.database_alias = None  # Will be set in initialise()
 
     def initialise(self):
-        logger.info("[WEB] Initializing TeamServerPoller...")
+        logger.info("[WEB] Initializing TeamServerPoller - scanning all operation databases...")
         
-        # Get the current active operation first
-        current_op = CurrentOperation.get_current()
-        if not current_op:
-            logger.warning("[WEB] No active operation found. Cannot initialize poller.")
-            return
-
-        logger.info(f"[WEB] Found active operation: {current_op.name}")
-        
-        # Always use 'active_op_db' as the database alias
-        self.database_alias = 'active_op_db'
-        
-        # Update the database path to use the correct operation database
         from django.conf import settings
-        db_path = settings.OPS_DATA_DIR / f"{current_op.name}.sqlite3"
-        logger.info(f"[WEB] Setting database path to: {db_path}")
+        from event_tracker.models import Operation
         
-        # Update the database connection settings
-        if 'active_op_db' in connections.databases:
-            connections['active_op_db'].close()  # Close existing connection
-        connections.databases['active_op_db']['NAME'] = str(db_path)
-        if hasattr(connections['active_op_db'], 'settings_dict'):
-            connections['active_op_db'].settings_dict['NAME'] = str(db_path)
-        connections['active_op_db'].connection = None  # Force re-evaluation/reconnection
-        
-        logger.info(f"[WEB] Set database alias to: {self.database_alias}")
-        logger.debug(f"[WEB] Database settings: {connections[self.database_alias].settings_dict}")
-
-        # Ensure the database tables exist
-        from django.core.management import call_command
-        try:
-            logger.info("[WEB] Running migrations for active_op_db...")
-            call_command('migrate', 'cobalt_strike_monitor', database=self.database_alias)
-            logger.info("[WEB] Migrations completed successfully")
-        except Exception as e:
-            logger.error(f"[WEB] Error running migrations: {e}")
-            return
-
-        # Check if the database exists and has the required tables
-        try:
-            with connections[self.database_alias].cursor() as cursor:
-                # First check if the table exists
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cobalt_strike_monitor_teamserver'")
-                if not cursor.fetchone():
-                    logger.error(f"[WEB] Required table 'cobalt_strike_monitor_teamserver' not found in {self.database_alias}")
-                    return
-                logger.debug("[WEB] TeamServer table found in database")
-                
-                # Check the total number of servers in the table
-                cursor.execute("SELECT COUNT(*) FROM cobalt_strike_monitor_teamserver")
-                total_servers = cursor.fetchone()[0]
-                logger.debug(f"[WEB] Total number of servers in database: {total_servers}")
-                
-                # List all servers and their active status
-                cursor.execute("SELECT id, description, active FROM cobalt_strike_monitor_teamserver")
-                servers = cursor.fetchall()
-                logger.debug(f"[WEB] All servers in database: {servers}")
-                
-                # Check specifically for active servers
-                cursor.execute("SELECT COUNT(*) FROM cobalt_strike_monitor_teamserver WHERE active = 1")
-                active_count = cursor.fetchone()[0]
-                logger.debug(f"[WEB] Number of active servers: {active_count}")
-                
-                if active_count == 0:
-                    logger.warning("[WEB] No active servers found in database. Checking default database for comparison...")
-                    # Check the default database for comparison
-                    with connections['default'].cursor() as default_cursor:
-                        default_cursor.execute("SELECT id, description, active FROM cobalt_strike_monitor_teamserver")
-                        default_servers = default_cursor.fetchall()
-                        logger.debug(f"[WEB] Servers in default database: {default_servers}")
-        except Exception as e:
-            logger.error(f"[WEB] Error checking database tables: {e}")
-            return
-
         # Clear out any orphan tasks
         try:
             for task in Task.objects.all():
@@ -141,21 +71,67 @@ class TeamServerPoller:
         except OperationalError:
             logger.error("[WEB] Task table (default DB) not accessible during initialise. Skipping orphan task cleanup.")
 
-        # Spawn some new tasks
-        try:
-            # Get all active team servers
-            servers = TeamServer.objects.using(self.database_alias).filter(active=True).all()
-            logger.info(f"[WEB] Found {servers.count()} active team servers")
+        # Get all operations from the default database
+        all_operations = Operation.objects.using('default').all()
+        logger.info(f"[WEB] Found {all_operations.count()} operations to scan")
+        
+        total_active_servers = 0
+        
+        # Scan each operation database for active teamservers
+        for operation in all_operations:
+            db_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
             
-            # Log details about each server found
-            for server in servers:
-                logger.debug(f"[WEB] Active server found: ID={server.id}, Description={server.description}, Active={server.active}")
-                logger.info(f"[WEB] Adding task for TeamServer ID: {server.id}")
-                self.add(server.id)
-        except OperationalError as e:
-            logger.error(f"[WEB] TeamServer table ({self.database_alias}) not accessible during initialise: {e}")
-        except Exception as e:
-            logger.error(f"[WEB] Unexpected error during initialise: {e}", exc_info=True)
+            # Skip if database file doesn't exist
+            if not db_path.exists():
+                logger.debug(f"[WEB] Operation {operation.name} database not found, skipping")
+                continue
+            
+            logger.info(f"[WEB] Scanning operation '{operation.name}' database...")
+            
+            # Create a temporary connection for this operation
+            temp_conn_name = f'temp_init_{operation.name}'
+            try:
+                if temp_conn_name not in connections.databases:
+                    connections.databases[temp_conn_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_conn_name]['NAME'] = str(db_path)
+                # Close existing connection if it exists
+                if temp_conn_name in connections:
+                    connections[temp_conn_name].close()
+                    del connections[temp_conn_name]
+                
+                # Check if the database has the required table
+                # Django will create the connection automatically when we access it
+                with connections[temp_conn_name].cursor() as cursor:
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cobalt_strike_monitor_teamserver'")
+                    if not cursor.fetchone():
+                        logger.debug(f"[WEB] TeamServer table not found in operation '{operation.name}', skipping")
+                        continue
+                    
+                    # Get all active teamservers in this operation
+                    cursor.execute("SELECT id, description FROM cobalt_strike_monitor_teamserver WHERE active = 1")
+                    active_servers = cursor.fetchall()
+                    
+                    if active_servers:
+                        logger.info(f"[WEB] Found {len(active_servers)} active teamserver(s) in operation '{operation.name}'")
+                        for server_id, description in active_servers:
+                            logger.info(f"[WEB] Starting poller for server ID {server_id} ({description}) in operation '{operation.name}'")
+                            self.add(server_id, operation_name=operation.name)
+                            total_active_servers += 1
+                    else:
+                        logger.debug(f"[WEB] No active teamservers found in operation '{operation.name}'")
+            except Exception as e:
+                logger.error(f"[WEB] Error scanning operation '{operation.name}': {e}", exc_info=True)
+            finally:
+                # Clean up temporary connection
+                if temp_conn_name in connections:
+                    try:
+                        connections[temp_conn_name].close()
+                    except:
+                        pass
+                if temp_conn_name in connections.databases:
+                    del connections.databases[temp_conn_name]
+        
+        logger.info(f"[WEB] Initialization complete. Started pollers for {total_active_servers} active teamserver(s) across all operations.")
 
     def get_current_active_operation(self):
         # Use the function from event_tracker.background_tasks
@@ -185,36 +161,97 @@ class TeamServerPoller:
         logger.warning("No active operation found")
         return None
 
-    def add(self, serverid):
-        # Always use 'active_op_db' as the database alias
-        self.database_alias = 'active_op_db'
-        logger.info(f"Using 'active_op_db' as database alias for server {serverid}")
+    def add(self, serverid, operation_name=None):
+        """
+        Add a polling task for a teamserver.
+        operation_name: The name of the operation this server belongs to (required)
+        """
+        if not operation_name:
+            logger.error(f"[WEB] operation_name is required for server {serverid}")
+            return
             
+        logger.info(f"[WEB] Adding poller for server {serverid} in operation '{operation_name}'")
+        
         try:
-            # Get the current active operation
-            current_op = get_current_active_operation()
-            if not current_op:
-                logger.warning("No active operation found. Cannot add task.")
-                return
-
-            logger.info(f"Found active operation: {current_op.name}")
+            from django.conf import settings
+            from django.db import connections
             
-            # Use the correct database alias for all queries
-            server = TeamServer.objects.using(self.database_alias).get(pk=serverid)
-            logger.info(f"Retrieved TeamServer: {server.description} ({server.hostname}:{server.port})")
+            # Set up the database connection for this operation
+            db_path = settings.OPS_DATA_DIR / f"{operation_name}.sqlite3"
             
-            # Check there's nothing already scheduled for this server:
-            if not Task.objects.filter(
-                    task_name="cobalt_strike_monitor.poll_team_server.poll_teamserver",
-                    task_params__startswith=f"[[{serverid}], ").exists():
-                logger.info(f"No existing task found for server {serverid}, scheduling new task")
-                poll_teamserver(serverid, schedule=timezone.now())
-            else:
-                logger.info(f"Task already exists for server {serverid}")
+            # Create a temporary connection to check the server
+            temp_conn_name = f'temp_add_{operation_name}_{serverid}'
+            try:
+                if temp_conn_name not in connections.databases:
+                    connections.databases[temp_conn_name] = connections.databases['active_op_db'].copy()
+                connections.databases[temp_conn_name]['NAME'] = str(db_path)
+                # Close existing connection if it exists
+                if temp_conn_name in connections:
+                    connections[temp_conn_name].close()
+                    del connections[temp_conn_name]
+                
+                # Get the server to verify it exists and is active
+                # Django will create the connection automatically when we access it
+                server = TeamServer.objects.using(temp_conn_name).get(pk=serverid)
+                logger.info(f"[WEB] Retrieved TeamServer: {server.description} ({server.hostname}:{server.port}) in operation '{operation_name}'")
+                
+                if not server.active:
+                    logger.warning(f"[WEB] Server {serverid} is not active, not starting poller")
+                    return
+                
+                # Check there's nothing already scheduled for this server in this operation:
+                # Include operation_name in task params to allow same server_id in different operations
+                task_params = f'[[{serverid}, "{operation_name}"], '
+                if not Task.objects.filter(
+                        task_name="cobalt_strike_monitor.poll_team_server.poll_teamserver",
+                        task_params__startswith=task_params).exists():
+                    logger.info(f"[WEB] No existing task found for server {serverid} in operation '{operation_name}', scheduling new task")
+                    poll_teamserver(serverid, operation_name, schedule=timezone.now())
+                else:
+                    logger.info(f"[WEB] Task already exists for server {serverid} in operation '{operation_name}'")
+            finally:
+                # Clean up temporary connection
+                if temp_conn_name in connections:
+                    try:
+                        connections[temp_conn_name].close()
+                    except:
+                        pass
+                if temp_conn_name in connections.databases:
+                    del connections.databases[temp_conn_name]
+        except TeamServer.DoesNotExist:
+            logger.error(f"[WEB] TeamServer with ID {serverid} not found in operation '{operation_name}'")
         except OperationalError as e:
-            logger.error(f"Database error when adding task for server {serverid}: {e}")
+            logger.error(f"[WEB] Database error when adding task for server {serverid} in operation '{operation_name}': {e}")
         except Exception as e:
-            logger.error(f"Error adding task for server {serverid}: {e}", exc_info=True)
+            logger.error(f"[WEB] Error adding task for server {serverid} in operation '{operation_name}': {e}", exc_info=True)
+    
+    def remove(self, serverid, operation_name):
+        """
+        Remove/stop a polling task for a teamserver.
+        operation_name: The name of the operation this server belongs to
+        """
+        logger.info(f"[WEB] Stopping poller for server {serverid} in operation '{operation_name}'")
+        
+        try:
+            # Find and delete tasks for this server in this operation
+            task_params = f'[[{serverid}, "{operation_name}"], '
+            tasks = Task.objects.filter(
+                task_name="cobalt_strike_monitor.poll_team_server.poll_teamserver",
+                task_params__startswith=task_params)
+            
+            deleted_count = tasks.count()
+            tasks.delete()
+            
+            if deleted_count > 0:
+                logger.info(f"[WEB] Stopped {deleted_count} poller task(s) for server {serverid} in operation '{operation_name}'")
+            else:
+                logger.debug(f"[WEB] No poller tasks found for server {serverid} in operation '{operation_name}'")
+                
+            # Also clear the cache lock
+            task_key = f'poll_teamserver_running_{serverid}_{operation_name}'
+            cache.delete(task_key)
+        except Exception as e:
+            logger.error(f"[WEB] Error removing task for server {serverid} in operation '{operation_name}': {e}", exc_info=True)
 
 
 def healthcheck_teamserver(serverid):
@@ -319,36 +356,28 @@ on ready {
     return tcp_error, aggressor_output, ssbot_status, found_jvm
 
 @background(schedule=5)
-def poll_teamserver(server_id):
+def poll_teamserver(server_id, operation_name):
     """
     Polls a team server for data.
+    operation_name: The name of the operation this server belongs to
     """
-    from event_tracker.models import CurrentOperation
     from django.conf import settings
     from django.db import connections
     import os
 
-    # Check if this task is already running
-    task_key = f'poll_teamserver_running_{server_id}'
+    # Check if this task is already running (include operation_name in key to allow same server_id in different operations)
+    task_key = f'poll_teamserver_running_{server_id}_{operation_name}'
     if cache.get(task_key):
-        logger.debug(f"Task for server {server_id} is already running, skipping")
+        logger.debug(f"[TASKS] Task for server {server_id} in operation '{operation_name}' is already running, skipping")
         return
     cache.set(task_key, True, 60)  # Set a 60-second lock
 
     try:
-        logger.debug(f"[TASKS] Starting poll_teamserver task for server_id={server_id}")
+        logger.debug(f"[TASKS] Starting poll_teamserver task for server_id={server_id} in operation '{operation_name}'")
 
-        # Always fetch the current operation from the database (CurrentOperation model)
-        current_op = CurrentOperation.get_current()
-        if not current_op:
-            logger.error("[TASKS] No active operation found in CurrentOperation model")
-            return
-
-        logger.debug(f"[TASKS] Found active operation: {current_op.name}")
-
-        # Set the database path BEFORE any database operations
-        db_path = settings.OPS_DATA_DIR / f"{current_op.name}.sqlite3"
-        logger.debug(f"[TASKS] Setting active_op_db to: {db_path}")
+        # Set the database path to the operation's database
+        db_path = settings.OPS_DATA_DIR / f"{operation_name}.sqlite3"
+        logger.debug(f"[TASKS] Setting active_op_db to: {db_path} for operation '{operation_name}'")
 
         # Update the database connection settings
         if 'active_op_db' in connections.databases:
@@ -476,10 +505,20 @@ def poll_teamserver(server_id):
                     
                     logger.debug(f"[TASKS] Started Aggressor process with PID: {p.pid}")
                     
-                    # Parse the output
+                    # Parse the output - this will run continuously until server is inactive or connection drops
                     logger.debug("[TASKS] Starting to parse Aggressor output")
                     parse(p, server)
                     logger.debug("[TASKS] Finished parsing Aggressor output")
+                    
+                    # Check if server is still active after parse() completed
+                    # If it is, the connection must have dropped unexpectedly - reschedule
+                    server.refresh_from_db(fields=['active'])
+                    if server.active:
+                        logger.warning(f"[TASKS] Connection to server {server.description} dropped unexpectedly, rescheduling in 5 seconds")
+                        from datetime import timedelta
+                        poll_teamserver(server_id, operation_name, schedule=timezone.now() + timedelta(seconds=5))
+                    else:
+                        logger.info(f"[TASKS] Server {server.description} is no longer active, not rescheduling")
                     
             except FileNotFoundError as e:
                 logger.error(f"[TASKS] Java Virtual Machine not found in $PATH: {e}")
@@ -489,6 +528,15 @@ def poll_teamserver(server_id):
                 logger.error(f"[TASKS] Error during polling: {e}", exc_info=True)
                 logger.error(f"[TASKS] Error type: {type(e).__name__}")
                 logger.error(f"[TASKS] Error details: {str(e)}")
+                # On error, check if server is still active and reschedule if so
+                try:
+                    server.refresh_from_db(fields=['active'])
+                    if server.active:
+                        logger.warning(f"[TASKS] Error occurred but server {server.description} is still active, rescheduling in 5 seconds")
+                        from datetime import timedelta
+                        poll_teamserver(server_id, operation_name, schedule=timezone.now() + timedelta(seconds=5))
+                except:
+                    pass
             finally:
                 # Clean up the temporary file
                 try:
@@ -530,6 +578,7 @@ def poll_teamserver(server_id):
     finally:
         # Release the lock
         cache.delete(task_key)
+        logger.debug(f"[TASKS] Released lock for server {server_id} in operation '{operation_name}'")
 
 
 def _get_jar_path():
@@ -555,7 +604,8 @@ def parse_line(line):
     """
     line_parts = re.search(r"^\[.\] \[([^\]]+)\] (.*)$", line)
     if not line_parts:
-        logger.debug(f"Could not parse: {line}")
+        # For non-data lines (status, debug, etc.) just log at debug level
+        logger.debug(f"[PARSER] Could not parse line into ID/JSON: {line}")
         return None, None
     return line_parts.group(1), json.loads(line_parts.group(2))
 
@@ -602,6 +652,11 @@ def parse(p, server):
                     continue
 
                 logger.debug(f"[PARSER] Successfully parsed line with ID: {line_id}")
+                # Log the raw line for beacon logs to debug task_id extraction
+                #if line.startswith("[B]"):
+                #    logger.debug(f"[PARSER] ===== RAW BEACON LOG LINE =====")
+                #    logger.debug(f"[PARSER] Full line: {line}")
+                #    logger.debug(f"[PARSER] ================================")
 
                 # First, lets flush the pending Beacon Log if we've moved onto a processing different type of line:
                 if not line.startswith("[B]"):
@@ -685,15 +740,40 @@ def parse(p, server):
                     archive.save()
                     logger.debug(f"[PARSER] Saved Archive: {archive.id}")
                 elif line.startswith("[B]"):  # Beacon Logs
-                    logger.debug("[PARSER] Processing Beacon Log")
-                    # Example:
-                    # [B] [1263] {"data":"received output:\n[+] roborg Runtime Initalized, assembly size 488960, .NET Runtime Version: 4.0.30319.42000 in AppDomain qiBsaBzIc\r\n", "type":"beacon_output", "bid":"270632664", "when":"1741168779890"}
-                    # To avoid hammering the DB and rerunning lots of regexes, we first try and buffer sequential output
-                    # logs in memory, but this only works for those logs read in a single non-blocking read, so
-                    # eventually we also have to attempt a DB level merge too.
-                    beacon_log = BeaconLog(**dict(filter(
-                        lambda elem: elem[0] in ["data", "operator", "output_job"],
-                        line_data.items())))
+                    # logger.info("[PARSER] ===== PROCESSING BEACON LOG =====")
+                    # logger.info(f"[PARSER] Line ID: {line_id}")
+                    # logger.info(f"[PARSER] Parsed JSON keys: {list(line_data.keys())}")
+                    # logger.info(f"[PARSER] Full parsed JSON data: {line_data}")
+                    # logger.info(f"[PARSER] Type: {line_data.get('type')}")
+                    
+                    # Check for task_id in the parsed data
+                    # if "task_id" in line_data:
+                    #     task_id_value = line_data.get('task_id')
+                    #     logger.info(f"[PARSER] ✓ task_id FOUND in parsed JSON: '{task_id_value}' (Python type: {type(task_id_value).__name__})")
+                    #     logger.info(f"[PARSER] task_id value repr: {repr(task_id_value)}")
+                    #     logger.info(f"[PARSER] task_id is None: {task_id_value is None}")
+                    #     logger.info(f"[PARSER] task_id == '': {task_id_value == ''}")
+                    # else:
+                    #     logger.warning(f"[PARSER] ✗ task_id NOT FOUND in parsed JSON keys!")
+                    #     logger.warning(f"[PARSER] Available keys: {list(line_data.keys())}")
+                    
+                    # Filter to only include non-None values for task_id, but include all for other fields
+                    filtered_data = {}
+                    for key, value in line_data.items():
+                        if key in ["data", "operator", "output_job"]:
+                            filtered_data[key] = value
+                            # logger.debug(f"[PARSER] Added {key} to filtered_data")
+                        elif key == "task_id":
+                            if value is not None and value != "":
+                                filtered_data[key] = value
+                                # logger.info(f"[PARSER] ✓ Including task_id in filtered_data: '{value}'")
+                            # else:
+                            #     logger.warning(f"[PARSER] ✗ Excluding task_id from filtered_data (value: {repr(value)})")
+                    
+                    # logger.info(f"[PARSER] Filtered data keys: {list(filtered_data.keys())}")
+                    # logger.info(f"[PARSER] Filtered data: {filtered_data}")
+                    beacon_log = BeaconLog(**filtered_data)
+                    # logger.info(f"[PARSER] BeaconLog object created. task_id attribute: {getattr(beacon_log, 'task_id', 'NOT SET')}")
 
                     beacon_log.type = clean_type(line_data["type"])
                     try:
@@ -706,6 +786,7 @@ def parse(p, server):
                     # Work back from the end of line_data, as there may (or may not) be an operator element in the
                     # middle which messes up later offsets
                     beacon_log.when = datetime.fromtimestamp(int(line_data["when"]) / 1000, tz=UTC)
+                    # logger.info(f"[PARSER] After setting when, beacon_log.task_id = {getattr(beacon_log, 'task_id', 'NOT SET')}")
 
                     if "data" in line_data:
                         # Trim prefix added by NCC custom tooling
@@ -720,31 +801,61 @@ def parse(p, server):
                     # So there remains the need to do additional processing to collate the output/errors associated with an input/task.
                     if pending_beacon_log:
                         # Does current entry fit with pending beacon log?
+                        # CRITICAL: Don't merge if task_id is present and differs between the two logs
+                        # This ensures outputs for different commands don't get merged together
+                        task_ids_match = True
+                        if pending_beacon_log.task_id and beacon_log.task_id:
+                            # Both have task_id - they must match to merge
+                            task_ids_match = (pending_beacon_log.task_id == beacon_log.task_id)
+                        elif pending_beacon_log.task_id or beacon_log.task_id:
+                            # One has task_id and the other doesn't - don't merge
+                            task_ids_match = False
+                        
                         if beacon_log.type == pending_beacon_log.type and \
                                 beacon_log.output_job == pending_beacon_log.output_job and \
                                 beacon_log.beacon_id == pending_beacon_log.beacon_id and \
                                 beacon_log.team_server_id == pending_beacon_log.team_server_id and \
-                                beacon_log.when - pending_beacon_log.when <= timedelta(milliseconds=15):
+                                beacon_log.when - pending_beacon_log.when <= timedelta(milliseconds=15) and \
+                                task_ids_match:
                             # Merge current with pending and discard current
-                            logger.debug("[PARSER] Merging beacon log with pending log")
+                            # logger.info(f"[PARSER] Merging beacon log with pending log")
+                            # logger.info(f"[PARSER] Current task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}, Pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log.data += beacon_log.data
                             pending_beacon_log.when = beacon_log.when # Update the time for use in subsequent time comparisons
-                        else:
-                            # Flush pending beacon log and save current one
-                            logger.debug("[PARSER] Flushing pending beacon log and saving new log")
-                            # Our regexes rely on a \n to find ends of passwords etc, so ensure there's always 1
+                            # Preserve task_id if present in current log but not in pending
+                            if beacon_log.task_id and not pending_beacon_log.task_id:
+                                pending_beacon_log.task_id = beacon_log.task_id
+                                # logger.info(f"[PARSER] Preserved task_id from current log: {beacon_log.task_id}")
+                            # logger.info(f"[PARSER] After merge, pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                        elif not task_ids_match:
+                            # Task IDs don't match - flush pending and save current separately
+                            # logger.info(f"[PARSER] Task IDs differ - flushing pending and saving current separately")
+                            # logger.info(f"[PARSER] Pending task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}, Current task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log.data = pending_beacon_log.data.rstrip("\n") + "\n"
                             pending_beacon_log.save()
                             pending_beacon_log = None
                             beacon_log.save()
+                        else:
+                            # Flush pending beacon log and save current one
+                            # logger.info(f"[PARSER] Flushing pending beacon log and saving new log")
+                            # logger.info(f"[PARSER] Pending task_id before save: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                            # Our regexes rely on a \n to find ends of passwords etc, so ensure there's always 1
+                            pending_beacon_log.data = pending_beacon_log.data.rstrip("\n") + "\n"
+                            pending_beacon_log.save()
+                            # logger.info(f"[PARSER] Saved pending beacon log with task_id: {getattr(pending_beacon_log, 'task_id', 'NOT SET')}")
+                            pending_beacon_log = None
+                            # logger.info(f"[PARSER] Current task_id before save: {getattr(beacon_log, 'task_id', 'NOT SET')}")
+                            beacon_log.save()
+                            # logger.info(f"[PARSER] Saved current beacon log with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                     else:
                         if beacon_log.type == "output":
-                            logger.debug("[PARSER] Setting new pending beacon log")
+                            # logger.info(f"[PARSER] Setting new pending beacon log with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             pending_beacon_log = beacon_log
                         else:
                             # There's no pending beacon log, just save this non-output log straight to the DB
-                            logger.debug("[PARSER] Saving non-output beacon log directly")
+                            # logger.info(f"[PARSER] Saving non-output beacon log directly with task_id: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                             beacon_log.save()
+                            # logger.info(f"[PARSER] Saved beacon log. After save, task_id in DB should be: {getattr(beacon_log, 'task_id', 'NOT SET')}")
                 elif line.startswith("[C]"):  # Credentials
                     logger.debug("[PARSER] Processing Credential")
                     credential = Credential(**dict(filter(

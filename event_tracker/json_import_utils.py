@@ -368,7 +368,7 @@ def create_beacon_log(team_server, beacon, log_entry, log_id, expected_db_path=N
     Uses get_or_create to avoid duplicates based on timestamp, beacon, and type.
     """
     import sys
-    from django.db import connections
+    from django.db import connections, models
     
     # Verify we're using the correct database, and fix if needed
     if expected_db_path:

@@ -258,6 +258,7 @@ def beaconlog_action_correlator(sender, instance: BeaconLog, **kwargs):
         elif instance.type == "task" and "Tasked beacon to sleep " in instance.data and\
                 not CSAction.objects.using(using).filter(beacon__pk=instance.beacon.pk, start__gte=instance.when - timedelta(seconds=1), start__lte=instance.when).exists():
             new_action = CSAction(start=instance.when, beacon_id=instance.beacon.pk)
+            new_action.accept_output = False
             new_action.save(using=using)
             instance.cs_action_id = new_action.pk
 

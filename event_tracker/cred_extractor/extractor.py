@@ -36,9 +36,10 @@ extractor_classes = [SnafflerExtractor, BrowserExtractor, NetNTLMv1Extractor, Ne
 
 
 @transaction.atomic
-def extract_and_save(input_text: str, default_system: str) -> tuple[int, int]:
+def extract_and_save(input_text: str, default_system: str, operation=None) -> tuple[int, int]:
     # Returns number individually saved, and number saved in the separate bulk save
-
+    # Note: operation parameter is ignored - credentials are already scoped to the operation via active_op_db
+    
     credentials_to_add, credentials_to_delete = extract(input_text, default_system)
     saved_secrets = 0
 
@@ -48,22 +49,32 @@ def extract_and_save(input_text: str, default_system: str) -> tuple[int, int]:
             # post-save action should be called, as we have a secret
             # use keys_to_save as a pseudo-uniqueness constraint for this write operation
             keys_to_save = ['source', 'source_time', 'system', 'account', 'secret', 'hash', 'hash_type', 'purpose', 'enabled']
-            saved_credential, created = Credential.objects.get_or_create(**{key: model_to_dict(cred)[key] for key in keys_to_save})
+            create_kwargs = {key: model_to_dict(cred)[key] for key in keys_to_save}
+            # Don't set operation field - credentials are already scoped to the operation via active_op_db
+            # Explicitly use active_op_db to ensure we're saving to the correct database
+            saved_credential, created = Credential.objects.using('active_op_db').get_or_create(**create_kwargs)
             if created:
                 saved_secrets += 1
         else:
+            # Don't set operation field - credentials are already scoped to the operation via active_op_db
             creds_to_add_in_bulk.append(cred)
 
     # A before and after count may be incorrect if other users are concurrently modifying the table,
     # but it's the best we have given the bulk operations don't return meaningful objects.
-    pre_insert_count = Credential.objects.count()
-    Credential.objects.bulk_create(creds_to_add_in_bulk, ignore_conflicts=True,
-                                   unique_fields=["hash", "hash_type", "account", "system"])
+    # Credentials are already scoped to the operation via active_op_db, so just count all
+    pre_insert_count = Credential.objects.using('active_op_db').count()
+    
+    # Explicitly use active_op_db for bulk_create
+    Credential.objects.using('active_op_db').bulk_create(creds_to_add_in_bulk, ignore_conflicts=True)
+    
+    # Count after
+    post_insert_count = Credential.objects.using('active_op_db').count()
 
+    # Delete from active_op_db
     for obj in credentials_to_delete:
-        obj.delete()
+        obj.delete(using='active_op_db')
 
-    return Credential.objects.count() - pre_insert_count, saved_secrets
+    return post_insert_count - pre_insert_count, saved_secrets
 
 
 def extract(input_text: str, default_system: str) -> ([Credential], [Credential]):

@@ -945,7 +945,7 @@ class GlobalSearchView(PermissionRequiredMixin, TemplateView):
         # Get all available operations
         from .models import Operation
         from django.db import DEFAULT_DB_ALIAS
-        operations = Operation.objects.using(DEFAULT_DB_ALIAS).order_by('display_name')
+        operations = Operation.objects.using(DEFAULT_DB_ALIAS).order_by('name')
         context['operations'] = operations
         return context
 
@@ -1260,16 +1260,14 @@ class CSActionListJSON(PermissionRequiredMixin, FilterableDatatableView):
         operator_subquery = BeaconLog.objects.filter(cs_action__id=OuterRef('pk'), operator__isnull=False)
         tactic_subquery = Archive.objects.filter(cs_action__id=OuterRef('pk'), tactic__isnull=False)
 
+        # Join against BeaconLog / Archive via annotations can introduce duplicate
+        # CSAction rows; ensure we only return each CSAction once.
         qs = (self.model.objects
                 .filter(beacon__in=Beacon.visible_beacons())
                 .annotate(operator_anno=Subquery(operator_subquery.values("operator")[:1]))
-                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1])))
-                # .distinct())  # Temporarily remove distinct to see if it's causing issues
-        
-        # Debug: Check what we're getting
-        print(f"DEBUG: get_initial_queryset - Total records: {qs.count()}")
-        print(f"DEBUG: get_initial_queryset - IDs: {list(qs.values_list('id', flat=True).order_by('id'))}")
-        
+                .annotate(tactic_anno=Subquery(tactic_subquery.values("tactic")[:1]))
+                .distinct())
+
         return qs
 
     def render_column(self, row, column):
@@ -2341,11 +2339,22 @@ def activate_operation(request, operation_name):
             logger.info(f"[ACTIVATE_OP] Attempt {attempt + 1}/{max_attempts} to initialize database for '{operation.name}'")
             
             # Ensure we're not in an atomic transaction before each attempt
+            # CRITICAL: Force close and remove the connection to ensure we get a fresh one
             if 'active_op_db' in connections:
-                connections['active_op_db'].close()
-                connections['active_op_db'].connection = None
+                try:
+                    connections['active_op_db'].close()
+                except:
+                    pass
+                try:
+                    connections['active_op_db'].connection = None
+                except:
+                    pass
+                # Also remove from the connections dict temporarily to force a fresh connection
+                # But we need to restore it, so we'll just update the settings
+                connections.databases['active_op_db']['NAME'] = str(settings.OPS_DATA_DIR / f"{operation.name}.sqlite3")
             
-            initialized, message = _initialize_operation_db(operation.name, settings.OPS_DATA_DIR)
+            # When activating an operation, run migrations to ensure it's up to date
+            initialized, message = _initialize_operation_db(operation.name, settings.OPS_DATA_DIR, run_migrations=True)
             logger.info(f"[ACTIVATE_OP] _initialize_operation_db returned: initialized={initialized}, message={message}")
             
             if initialized:
@@ -2376,7 +2385,7 @@ def activate_operation(request, operation_name):
         return redirect('event_tracker:select_operation')
 
     try:
-        # Create CurrentOperation entry
+        # Create or update the singleton CurrentOperation entry
         CurrentOperation.objects.using('default').create(operation=operation)
         logger.info(f"[ACTIVATE_OP] Created new CurrentOperation entry for '{operation.name}'")
 
@@ -2487,6 +2496,64 @@ class InitialConfigTask(LoginRequiredMixin, UserPassesTestMixin, CreateView):
         # Redirect to the event list for the newly created task
         return reverse_lazy('event_tracker:event-list', kwargs={"task_id": self.object.pk})
 
+@login_required
+def import_progress(request):
+    """Return JSON with import progress information"""
+    from django.core.cache import cache
+    from django.http import JsonResponse
+    import traceback
+    
+    try:
+        # Check if requesting progress_id from session
+        if request.GET.get('get_id') == 'true':
+            progress_id = request.session.get('import_progress_id')
+            if progress_id:
+                return JsonResponse({'progress_id': progress_id})
+            else:
+                return JsonResponse({'progress_id': None})
+        
+        progress_id = request.GET.get('progress_id')
+        if not progress_id:
+            return JsonResponse({'error': 'No progress_id provided', 'status': 'error', 'progress': 0}, status=400)
+        
+        progress_data = cache.get(f'import_progress_{progress_id}')
+        if progress_data is None:
+            return JsonResponse({'status': 'not_found', 'message': 'Progress not found', 'progress': 0})
+        
+        # Ensure progress is always a number (not None)
+        if progress_data.get('progress') is None:
+            progress_data['progress'] = 0
+        else:
+            # Ensure progress is an integer
+            try:
+                progress_data['progress'] = int(progress_data['progress'])
+            except (ValueError, TypeError):
+                progress_data['progress'] = 0
+        
+        # Add redirect URL if completed
+        if progress_data.get('status') == 'completed':
+            operation_name = request.session.get('import_operation_name')
+            if operation_name:
+                from django.urls import reverse
+                try:
+                    progress_data['redirect_url'] = reverse('event_tracker:activate_operation', kwargs={'operation_name': operation_name})
+                except Exception as e:
+                    # If reverse fails, just don't include redirect_url
+                    pass
+        
+        return JsonResponse(progress_data)
+    except Exception as e:
+        # Always return JSON, even on error
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in import_progress view: {e}", exc_info=True)
+        return JsonResponse({
+            'status': 'error',
+            'message': f'Error fetching progress: {str(e)}',
+            'progress': 0
+        }, status=500)
+
+
 class ImportOperationView(LoginRequiredMixin, CreateView):
     form_class = ImportOperationForm
     template_name = 'event_tracker/operation_import.html'
@@ -2497,30 +2564,223 @@ class ImportOperationView(LoginRequiredMixin, CreateView):
         # Remove instance from kwargs since ImportOperationForm is not a ModelForm
         kwargs.pop('instance', None)
         return kwargs
+    
+    def _deactivate_current_operation(self):
+        """
+        Deactivate any currently active operation to prevent imports from writing to it.
+        This clears the session, CurrentOperation model, and resets the active_op_db connection.
+        """
+        from django.db import connections
+        from .models import CurrentOperation
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Clear session variables
+            if 'active_operation_name' in self.request.session:
+                old_op_name = self.request.session.get('active_operation_name')
+                logger.info(f"[IMPORT] Deactivating active operation '{old_op_name}' before import")
+                self.request.session.pop('active_operation_name', None)
+                self.request.session.pop('active_operation_display_name', None)
+                self.request.session.save()
+            
+            # Clear CurrentOperation model
+            try:
+                CurrentOperation.objects.using('default').all().delete()
+                logger.info("[IMPORT] Cleared CurrentOperation entries")
+            except Exception as e:
+                logger.warning(f"[IMPORT] Error clearing CurrentOperation: {e}")
+            
+            # Close and reset active_op_db connection
+            if 'active_op_db' in connections:
+                try:
+                    connections['active_op_db'].close()
+                    connections['active_op_db'].connection = None
+                    logger.info("[IMPORT] Closed active_op_db connection")
+                except Exception as e:
+                    logger.warning(f"[IMPORT] Error closing active_op_db connection: {e}")
+            
+            # Reset active_op_db configuration to prevent middleware from reusing it
+            # Set it to a dummy path so middleware won't try to use it
+            if 'active_op_db' in connections.databases:
+                connections.databases['active_op_db'] = {
+                    'ENGINE': 'django.db.backends.sqlite3',
+                    'NAME': '',  # Empty name prevents accidental use
+                    'OPTIONS': {'timeout': 20},
+                    'ATOMIC_REQUESTS': False,
+                    'CONN_MAX_AGE': 0,
+                    'AUTOCOMMIT': True,
+                }
+                logger.info("[IMPORT] Reset active_op_db configuration")
+                
+        except Exception as e:
+            logger.error(f"[IMPORT] Error deactivating current operation: {e}", exc_info=True)
+            # Don't raise - we want to continue with the import even if deactivation fails
 
     def form_valid(self, form):
         try:
+            # CRITICAL: Deactivate any currently active operation before starting import
+            # This prevents the import from writing to the active operation's database
+            self._deactivate_current_operation()
+            
             # Create the operation in the default database
             operation = Operation.objects.create(
                 name=form.cleaned_data['name'],
                 display_name=form.cleaned_data['display_name']
             )
 
-            # Get the uploaded file
-            db_file = form.cleaned_data['db_file']
+            # Get the uploaded file(s)
+            db_file = form.cleaned_data.get('db_file')
+            json_file = form.cleaned_data.get('json_file')
+            
+            # Determine destination path - import settings here to avoid scoping issues
+            from django.conf import settings as django_settings
+            destination_path = django_settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+            
+            # Handle JSON import
+            if json_file:
+                try:
+                    from .json_import_utils import import_json_to_database
+                    from django.core.cache import cache
+                    import uuid
+                    
+                    # Generate a unique progress ID for this import
+                    progress_id = str(uuid.uuid4())
+                    
+                    # Store progress_id in session BEFORE starting import so frontend can poll immediately
+                    self.request.session['import_progress_id'] = progress_id
+                    self.request.session['import_operation_name'] = operation.name
+                    self.request.session.save()  # Force session save so it's available immediately
+                    
+                    # Initialize progress tracking
+                    cache.set(f'import_progress_{progress_id}', {
+                        'status': 'starting',
+                        'message': 'Initializing import...',
+                        'progress': 0,
+                        'total': 0,
+                        'current': 0
+                    }, timeout=3600)  # 1 hour timeout
+                    
+                    # Read file content into memory before starting background thread
+                    # Django's UploadedFile may be closed when request ends
+                    json_file.seek(0)  # Reset file pointer
+                    json_file_content = json_file.read()
+                    json_file_name = json_file.name
+                    
+                    # Run import in background thread so we can return response immediately
+                    import threading
+                    from io import BytesIO
+                    def run_import():
+                        try:
+                            # Create a new file-like object from the content
+                            json_file_obj = BytesIO(json_file_content)
+                            json_file_obj.name = json_file_name
+                            
+                            result = import_json_to_database(
+                                json_file_obj,
+                                destination_path,
+                                operation_name=operation.name,
+                                progress_id=progress_id
+                            )
+                            
+                            # Handle both tuple return (UI) and None return (CLI)
+                            if result is None:
+                                # CLI mode - should not happen from UI, but handle gracefully
+                                cache.set(f'import_progress_{progress_id}', {
+                                    'status': 'error',
+                                    'message': 'Import completed but no result returned.',
+                                    'progress': 0,
+                                    'total': 0,
+                                    'current': 0
+                                }, timeout=3600)
+                                operation.delete()
+                                return
+                            
+                            success, message, stats = result
+                            
+                            if not success:
+                                # Import failed - update progress and delete operation
+                                cache.set(f'import_progress_{progress_id}', {
+                                    'status': 'error',
+                                    'message': message,
+                                    'progress': 0,
+                                    'total': 0,
+                                    'current': 0
+                                }, timeout=3600)
+                                operation.delete()
+                            # If successful, progress will already be set to 'completed' by import_json_to_database
+                        except Exception as e:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"Error in background import thread: {e}", exc_info=True)
+                            cache.set(f'import_progress_{progress_id}', {
+                                'status': 'error',
+                                'message': f'Import failed: {str(e)}',
+                                'progress': 0,
+                                'total': 0,
+                                'current': 0
+                            }, timeout=3600)
+                            try:
+                                operation.delete()
+                            except:
+                                pass
+                    
+                    # Start import in background thread
+                    import_thread = threading.Thread(target=run_import, daemon=True)
+                    import_thread.start()
+                    
+                    # Return immediately with progress_id so frontend can start polling
+                    if self.request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                        from django.urls import reverse
+                        return JsonResponse({
+                            'success': True,
+                            'progress_id': progress_id,
+                            'redirect_url': reverse('event_tracker:activate_operation', kwargs={'operation_name': operation.name}),
+                            'message': 'Import started. Progress will be tracked.'
+                        })
+                    
+                    # Fallback for non-AJAX requests
+                    messages.success(self.request, 'Import started. Please wait for it to complete.')
+                    return redirect('event_tracker:select_operation')
+                except Exception as import_error:
+                    # If import_json_to_database raises an exception instead of returning a tuple
+                    operation.delete()
+                    import traceback
+                    error_msg = f"Error during JSON import: {str(import_error)}\n{traceback.format_exc()}"
+                    
+                    # Mark progress as error
+                    if 'progress_id' in locals():
+                        from django.core.cache import cache
+                        cache.set(f'import_progress_{progress_id}', {
+                            'status': 'error',
+                            'message': f'Import failed: {str(import_error)}',
+                            'progress': 0,
+                            'total': 0,
+                            'current': 0
+                        }, timeout=300)
+                    
+                    messages.error(self.request, error_msg)
+                    return self.form_invalid(form)
+            
+            # Handle SQLite database import (existing logic)
+            if not db_file:
+                operation.delete()
+                messages.error(self.request, "No file provided for import.")
+                return self.form_invalid(form)
             
             # Save the database file to the ops-data directory
             import shutil
             import os
-            from django.conf import settings
+            # Use module-level settings import (already imported at top of file)
             from django.core.management import call_command
             from io import StringIO
             
             # Ensure the ops-data directory exists
-            os.makedirs(settings.OPS_DATA_DIR, exist_ok=True)
+            os.makedirs(django_settings.OPS_DATA_DIR, exist_ok=True)
             
             # Save the file
-            destination_path = settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
+            destination_path = django_settings.OPS_DATA_DIR / f"{operation.name}.sqlite3"
             with open(destination_path, 'wb+') as destination:
                 for chunk in db_file.chunks():
                     destination.write(chunk)
@@ -2603,7 +2863,8 @@ class ImportOperationView(LoginRequiredMixin, CreateView):
                 new_user.save(using='active_op_db')
 
             messages.success(self.request, f"Operation '{operation.display_name}' imported successfully.")
-            return super().form_valid(form)
+            # Redirect to activate the operation
+            return redirect(reverse('event_tracker:activate_operation', kwargs={'operation_name': operation.name}))
         except Exception as e:
             messages.error(self.request, f"Error importing operation: {str(e)}")
             return self.form_invalid(form)
@@ -2644,20 +2905,502 @@ class DeleteOperationView(LoginRequiredMixin, DeleteView):
     def get_queryset(self):
         return Operation.objects.using(DEFAULT_DB_ALIAS)
 
+    def post(self, request, *args, **kwargs):
+        """Override post() to ensure our delete() method is called"""
+        import sys
+        print("=" * 80, file=sys.stderr)
+        print("DELETE OPERATION: POST METHOD CALLED", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        sys.stderr.flush()
+        return self.delete(request, *args, **kwargs)
+
     def delete(self, request, *args, **kwargs):
-        self.object = self.get_object()
-        db_path = settings.OPS_DATA_DIR / f"{self.object.name}.sqlite3"
-        # Capture db_path before deletion
-        response = super().delete(request, *args, **kwargs)
+        import logging
+        import sys
+        import os
+        import stat
+        from django.conf import settings as django_settings
+        from pathlib import Path
+        
+        # Use both logger and print to ensure we see output
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+        
+        # CRITICAL: Print immediately to ensure we see this
+        print("=" * 80, file=sys.stderr)
+        print("DELETE OPERATION: METHOD CALLED", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        sys.stderr.flush()
+        
+        try:
+            self.object = self.get_object()
+            operation_name = self.object.name
+            operation_display_name = self.object.display_name
+            
+            print(f"DELETE OPERATION: Got object - name='{operation_name}', display='{operation_display_name}'", file=sys.stderr)
+            sys.stderr.flush()
+        except Exception as get_obj_error:
+            print(f"DELETE OPERATION: ERROR getting object: {get_obj_error}", file=sys.stderr)
+            import traceback
+            print(traceback.format_exc(), file=sys.stderr)
+            sys.stderr.flush()
+            raise
+        
+        # CRITICAL: Resolve to absolute path to ensure we're using the correct path
+        ops_data_dir = Path(django_settings.OPS_DATA_DIR).resolve()
+        db_path = ops_data_dir / f"{operation_name}.sqlite3"
+        db_path = db_path.resolve()  # Ensure absolute path
+        
+        # Log to both logger and stderr
+        log_msg = f"DELETE OPERATION: ========== STARTING DELETION =========="
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Operation name: '{operation_name}'"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Operation display name: '{operation_display_name}'"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: OPS_DATA_DIR setting: {django_settings.OPS_DATA_DIR}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: OPS_DATA_DIR type: {type(django_settings.OPS_DATA_DIR)}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Resolved OPS_DATA_DIR: {ops_data_dir}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Resolved OPS_DATA_DIR exists: {ops_data_dir.exists()}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Database file path: {db_path}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Database file path (str): {str(db_path)}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
+        log_msg = f"DELETE OPERATION: Database file exists: {db_path.exists()}"
+        logger.error(log_msg)
+        print(log_msg, file=sys.stderr)
+        
         if db_path.exists():
             try:
-                db_path.unlink()
-            except Exception as e:
-                messages.warning(request, f"Could not delete database file: {e}")
+                file_stat = db_path.stat()
+                logger.error(f"DELETE OPERATION: Database file size: {file_stat.st_size} bytes")
+                logger.error(f"DELETE OPERATION: Database file permissions: {oct(file_stat.st_mode)}")
+                logger.error(f"DELETE OPERATION: Database file owner UID: {file_stat.st_uid}")
+                logger.error(f"DELETE OPERATION: Database file owner GID: {file_stat.st_gid}")
+                logger.error(f"DELETE OPERATION: Current process UID: {os.getuid() if hasattr(os, 'getuid') else 'N/A'}")
+                logger.error(f"DELETE OPERATION: Current process GID: {os.getgid() if hasattr(os, 'getgid') else 'N/A'}")
+                logger.error(f"DELETE OPERATION: File is readable: {os.access(str(db_path), os.R_OK)}")
+                logger.error(f"DELETE OPERATION: File is writable: {os.access(str(db_path), os.W_OK)}")
+            except Exception as stat_error:
+                logger.error(f"DELETE OPERATION: Error getting file stats: {stat_error}")
         else:
-            messages.warning(request, f"Database file {db_path} not found for deletion.")
-        messages.success(request, f"Operation '{self.object.display_name}' and its database file have been deleted.")
-        return response
+            logger.error(f"DELETE OPERATION: Database file does NOT exist at path: {db_path}")
+            # Try to find it
+            if ops_data_dir.exists():
+                logger.error(f"DELETE OPERATION: Listing files in ops-data directory:")
+                try:
+                    for f in ops_data_dir.iterdir():
+                        logger.error(f"DELETE OPERATION:   Found: {f.name} (exists: {f.exists()})")
+                except Exception as list_error:
+                    logger.error(f"DELETE OPERATION: Error listing directory: {list_error}")
+        
+        sys.stderr.flush()
+        
+        # Close ALL database connections that might be using this database file
+        from django.db import connections
+        db_path_str = str(db_path)
+        msg = f"DELETE OPERATION: Checking all database connections for: {db_path_str}"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        
+        # Get list of connection names
+        connection_names = list(connections)
+        msg = f"DELETE OPERATION: Total connections: {len(connection_names)}"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        sys.stderr.flush()
+        
+        # Close all actual connection objects, not just check configs
+        connections_closed = 0
+        for conn_name in connection_names:
+            try:
+                conn = connections[conn_name]
+                conn_db_name = conn.settings_dict.get('NAME', '')
+                if isinstance(conn_db_name, Path):
+                    conn_db_name = str(conn_db_name)
+                for msg in [
+                    f"DELETE OPERATION: Connection '{conn_name}' points to: {conn_db_name}",
+                    f"DELETE OPERATION: Connection '{conn_name}' type: {type(conn_db_name)}",
+                    f"DELETE OPERATION: Connection '{conn_name}' has connection object: {hasattr(conn, 'connection')}"
+                ]:
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                
+                if hasattr(conn, 'connection') and conn.connection:
+                    msg = f"DELETE OPERATION: Connection '{conn_name}' connection object: {conn.connection}"
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                
+                # Normalize paths for comparison
+                conn_db_resolved = str(Path(conn_db_name).resolve()) if conn_db_name else ""
+                target_path_resolved = str(db_path.resolve())
+                
+                msg = f"DELETE OPERATION: Comparing '{conn_db_resolved}' == '{target_path_resolved}': {conn_db_resolved == target_path_resolved}"
+                logger.error(msg)
+                print(msg, file=sys.stderr)
+                
+                if conn_db_resolved == target_path_resolved or conn_db_name == db_path_str:
+                    msg = f"DELETE OPERATION: MATCH! Closing connection '{conn_name}' that uses this database"
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                    try:
+                        if hasattr(conn, 'close'):
+                            conn.close()
+                            msg = f"DELETE OPERATION: Called close() on connection '{conn_name}'"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                        if hasattr(conn, 'connection'):
+                            conn.connection = None
+                            msg = f"DELETE OPERATION: Set connection.connection = None for '{conn_name}'"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                        connections_closed += 1
+                        msg = f"DELETE OPERATION: Successfully closed connection '{conn_name}'"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                    except Exception as e:
+                        msg = f"DELETE OPERATION: Error closing connection '{conn_name}': {e}"
+                        logger.error(msg, exc_info=True)
+                        print(msg, file=sys.stderr)
+            except Exception as e:
+                msg = f"DELETE OPERATION: Error checking/closing connection '{conn_name}': {e}"
+                logger.error(msg, exc_info=True)
+                print(msg, file=sys.stderr)
+        
+        msg = f"DELETE OPERATION: Closed {connections_closed} connection(s) that matched the database path"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        sys.stderr.flush()
+        
+        # Delete the database file BEFORE deleting the operation record
+        # This ensures we can still access self.object if needed
+        msg = f"DELETE OPERATION: Attempting to delete database file BEFORE deleting operation record"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        sys.stderr.flush()
+        
+        file_deleted = False
+        import time
+        
+        if db_path.exists():
+            try:
+                # Also try to delete WAL and SHM files if they exist
+                wal_path = Path(str(db_path) + '-wal')
+                shm_path = Path(str(db_path) + '-shm')
+                
+                if wal_path.exists():
+                    logger.error(f"DELETE OPERATION: Also deleting WAL file: {wal_path}")
+                    try:
+                        wal_path.unlink()
+                        logger.error(f"DELETE OPERATION: WAL file deleted successfully")
+                    except Exception as e:
+                        logger.error(f"DELETE OPERATION: Could not delete WAL file: {e}", exc_info=True)
+                
+                if shm_path.exists():
+                    logger.error(f"DELETE OPERATION: Also deleting SHM file: {shm_path}")
+                    try:
+                        shm_path.unlink()
+                        logger.error(f"DELETE OPERATION: SHM file deleted successfully")
+                    except Exception as e:
+                        logger.error(f"DELETE OPERATION: Could not delete SHM file: {e}", exc_info=True)
+                
+                msg = f"DELETE OPERATION: Attempting to unlink database file: {db_path}"
+                logger.error(msg)
+                print(msg, file=sys.stderr)
+                msg = f"DELETE OPERATION: File still exists before deletion attempt: {db_path.exists()}"
+                logger.error(msg)
+                print(msg, file=sys.stderr)
+                sys.stderr.flush()
+                
+                # Force close any remaining connections and retry if needed
+                max_retries = 10
+                for attempt in range(max_retries):
+                    msg = f"DELETE OPERATION: ===== DELETION ATTEMPT {attempt + 1}/{max_retries} ====="
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                    msg = f"DELETE OPERATION: File exists before attempt: {db_path.exists()}"
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                    
+                    try:
+                        # Try pathlib unlink first
+                        msg = f"DELETE OPERATION: Calling db_path.unlink()..."
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        sys.stderr.flush()
+                        
+                        db_path.unlink()
+                        
+                        msg = f"DELETE OPERATION: unlink() call completed without exception"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        msg = f"DELETE OPERATION: File exists after unlink(): {db_path.exists()}"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        
+                        # Double-check with os.path.exists
+                        import os.path
+                        os_exists = os.path.exists(str(db_path))
+                        msg = f"DELETE OPERATION: os.path.exists() after unlink(): {os_exists}"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        
+                        if not db_path.exists() and not os_exists:
+                            msg = f"DELETE OPERATION: SUCCESS! File deleted using pathlib.unlink() on attempt {attempt + 1}"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            sys.stderr.flush()
+                            file_deleted = True
+                            break
+                        else:
+                            msg = f"DELETE OPERATION: WARNING! unlink() returned but file still exists!"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            msg = f"DELETE OPERATION: Will retry..."
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            sys.stderr.flush()
+                            time.sleep(0.5)
+                            continue
+                    except PermissionError as pe:
+                        for msg in [
+                            f"DELETE OPERATION: PermissionError on attempt {attempt + 1}/{max_retries}: {pe}",
+                            f"DELETE OPERATION: Exception type: {type(pe)}",
+                            f"DELETE OPERATION: Exception args: {pe.args}"
+                        ]:
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                        if attempt < max_retries - 1:
+                            msg = f"DELETE OPERATION: Retrying..."
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            # Force close ALL connections more aggressively
+                            for conn_name in list(connections):
+                                try:
+                                    conn = connections[conn_name]
+                                    if hasattr(conn, 'close'):
+                                        conn.close()
+                                        msg = f"DELETE OPERATION: Closed connection '{conn_name}' during retry"
+                                        logger.error(msg)
+                                        print(msg, file=sys.stderr)
+                                    if hasattr(conn, 'connection'):
+                                        conn.connection = None
+                                    # Try to remove from connections dict
+                                    try:
+                                        del connections[conn_name]
+                                        msg = f"DELETE OPERATION: Removed connection '{conn_name}' from dict"
+                                        logger.error(msg)
+                                        print(msg, file=sys.stderr)
+                                    except:
+                                        pass
+                                except Exception as close_error:
+                                    msg = f"DELETE OPERATION: Error closing connection '{conn_name}': {close_error}"
+                                    logger.error(msg, exc_info=True)
+                                    print(msg, file=sys.stderr)
+                            time.sleep(0.5)
+                        else:
+                            # Last attempt - try os.remove as fallback
+                            msg = f"DELETE OPERATION: Last attempt - trying os.remove() as fallback..."
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            sys.stderr.flush()
+                            try:
+                                os.remove(str(db_path))
+                                msg = f"DELETE OPERATION: SUCCESS! Deleted using os.remove()"
+                                logger.error(msg)
+                                print(msg, file=sys.stderr)
+                                sys.stderr.flush()
+                                file_deleted = True
+                                break
+                            except Exception as os_error:
+                                error_msg = f"Permission denied deleting database file {db_path} after {max_retries} attempts: {pe}. os.remove() also failed: {os_error}"
+                                logger.error(error_msg, exc_info=True)
+                                print(error_msg, file=sys.stderr)
+                                sys.stderr.flush()
+                                messages.error(request, error_msg)
+                                # Don't raise - we'll handle it below
+                    except FileNotFoundError:
+                        # File was already deleted, that's fine
+                        msg = f"DELETE OPERATION: FileNotFoundError - file already deleted"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        sys.stderr.flush()
+                        file_deleted = True
+                        break
+                    except Exception as e:
+                        for msg in [
+                            f"DELETE OPERATION: Exception on attempt {attempt + 1}/{max_retries}: {type(e).__name__}: {e}",
+                            f"DELETE OPERATION: Exception details:"
+                        ]:
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                        logger.error("", exc_info=True)
+                        import traceback
+                        print(traceback.format_exc(), file=sys.stderr)
+                        if attempt < max_retries - 1:
+                            msg = f"DELETE OPERATION: Retrying..."
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            # Try closing connections
+                            for conn_name in list(connections):
+                                try:
+                                    connections[conn_name].close()
+                                    connections[conn_name].connection = None
+                                except:
+                                    pass
+                            time.sleep(0.5)
+                        else:
+                            # Last attempt - try os.remove as fallback
+                            msg = f"DELETE OPERATION: Last attempt - trying os.remove() as fallback for error: {e}"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                            sys.stderr.flush()
+                            try:
+                                os.remove(str(db_path))
+                                msg = f"DELETE OPERATION: SUCCESS! Deleted using os.remove()"
+                                logger.error(msg)
+                                print(msg, file=sys.stderr)
+                                sys.stderr.flush()
+                                file_deleted = True
+                                break
+                            except Exception as os_error:
+                                error_msg = f"Could not delete database file {db_path} after {max_retries} attempts: {e}. os.remove() also failed: {os_error}"
+                                logger.error(error_msg, exc_info=True)
+                                print(error_msg, file=sys.stderr)
+                                import traceback
+                                print(traceback.format_exc(), file=sys.stderr)
+                                sys.stderr.flush()
+                                messages.error(request, error_msg)
+                                # Don't raise - we'll handle it below
+                
+                # Verify file was actually deleted
+                if file_deleted:
+                    # Wait a moment and verify
+                    msg = f"DELETE OPERATION: Waiting 0.2 seconds before verification..."
+                    logger.error(msg)
+                    print(msg, file=sys.stderr)
+                    time.sleep(0.2)
+                    
+                    pathlib_exists = db_path.exists()
+                    import os.path
+                    os_exists = os.path.exists(str(db_path))
+                    
+                    for msg in [
+                        f"DELETE OPERATION: Verification after deletion:",
+                        f"DELETE OPERATION:   pathlib.exists(): {pathlib_exists}",
+                        f"DELETE OPERATION:   os.path.exists(): {os_exists}"
+                    ]:
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                    
+                    if pathlib_exists or os_exists:
+                        error_msg = f"Database file {db_path} still exists after deletion attempt. File may be locked."
+                        logger.error(error_msg)
+                        print(error_msg, file=sys.stderr)
+                        msg = f"DELETE OPERATION: Attempting to get file info..."
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        try:
+                            if db_path.exists():
+                                stat_info = db_path.stat()
+                                for msg in [
+                                    f"DELETE OPERATION: File still has size: {stat_info.st_size} bytes",
+                                    f"DELETE OPERATION: File permissions: {oct(stat_info.st_mode)}"
+                                ]:
+                                    logger.error(msg)
+                                    print(msg, file=sys.stderr)
+                        except Exception as stat_err:
+                            msg = f"DELETE OPERATION: Could not stat file: {stat_err}"
+                            logger.error(msg)
+                            print(msg, file=sys.stderr)
+                        sys.stderr.flush()
+                        messages.error(request, error_msg)
+                        file_deleted = False  # Mark as failed
+                    else:
+                        msg = f"DELETE OPERATION: SUCCESS! Database file deletion verified - file no longer exists"
+                        logger.error(msg)
+                        print(msg, file=sys.stderr)
+                        sys.stderr.flush()
+            except Exception as e:
+                error_msg = f"Unexpected error during file deletion: {e}"
+                logger.error(error_msg, exc_info=True)
+                print(error_msg, file=sys.stderr)
+                import traceback
+                print(traceback.format_exc(), file=sys.stderr)
+                sys.stderr.flush()
+                messages.error(request, error_msg)
+        else:
+            msg = f"DELETE OPERATION: Database file {db_path} was not found (may have already been deleted)."
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
+            # If file doesn't exist, consider it "deleted" for our purposes
+            file_deleted = True
+        
+        # Only delete the operation record if file deletion succeeded (or file didn't exist)
+        for msg in [
+            f"DELETE OPERATION: ===== FINAL CHECK ======",
+            f"DELETE OPERATION: file_deleted flag: {file_deleted}",
+            f"DELETE OPERATION: db_path.exists(): {db_path.exists()}"
+        ]:
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+        import os.path
+        msg = f"DELETE OPERATION: os.path.exists(): {os.path.exists(str(db_path))}"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        sys.stderr.flush()
+        
+        if file_deleted:
+            msg = f"DELETE OPERATION: File deletion successful, proceeding to delete operation record"
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
+            response = super().delete(request, *args, **kwargs)
+            msg = f"DELETE OPERATION: Operation record deleted successfully"
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+            messages.success(request, f"Operation '{operation_display_name}' and its database file have been deleted.")
+            msg = f"DELETE OPERATION: ========== DELETION COMPLETE =========="
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
+            return response
+        else:
+            error_msg = f"Could not delete database file {db_path}. Operation record was NOT deleted to prevent data loss."
+            logger.error(error_msg)
+            print(error_msg, file=sys.stderr)
+            msg = f"DELETE OPERATION: ========== DELETION FAILED =========="
+            logger.error(msg)
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
+            messages.error(request, error_msg)
+            # Return error response without deleting operation
+            from django.http import HttpResponseRedirect
+            from django.urls import reverse
+            return HttpResponseRedirect(reverse('event_tracker:select_operation'))
 
     def get_success_url(self):
         return reverse_lazy('event_tracker:select_operation')

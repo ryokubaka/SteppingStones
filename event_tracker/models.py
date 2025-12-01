@@ -341,6 +341,7 @@ class HashCatMode(IntEnum):
 
 
 class Credential(models.Model):
+    operation = models.ForeignKey('Operation', on_delete=models.CASCADE, null=True, blank=True, help_text="The operation this credential belongs to. If null, credential is shared across all operations.")
     source = models.CharField(max_length=200, null=True, blank=True, help_text="The tool or technique which yeilded the hash or secret")
     source_time = models.DateTimeField(null=True, blank=True, default=timezone.now, help_text="Timestamp for when the hash or secret was obtained from the source or imported into Stepping Stones")
     system = models.CharField(max_length=200, null=True, blank=True, db_collation="nocase", help_text="The scope of the account, i.e. the name of the domain or host it applies to")
@@ -370,7 +371,7 @@ class Credential(models.Model):
             models.Index(fields=["system", "account"]),
             models.Index(fields=["secret", "hash"]),
         ]
-        unique_together = ['system', 'account', 'hash', 'hash_type']
+        unique_together = ['operation', 'system', 'account', 'hash', 'hash_type']
 
 
 class EventMapping(models.Model):

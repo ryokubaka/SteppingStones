@@ -17,7 +17,7 @@ class OperationRouter:
     # Add any other apps that are purely operation-specific
     
     # Models within event_tracker that are shared (use 'default' DB)
-    shared_event_tracker_models = {'operation', 'userpreferences', 'credential', 'bloodhoundserver', 'currentoperation', 'ldapsettings'}
+    shared_event_tracker_models = {'operation', 'userpreferences', 'bloodhoundserver', 'currentoperation', 'ldapsettings'}
 
     def db_for_read(self, model, **hints):
         app_label = model._meta.app_label
@@ -60,6 +60,12 @@ class OperationRouter:
         # This ensures that operation-specific models can reference content types from the default database
         if (obj1.__class__._meta.model_name == 'contenttype' and db_obj2 == 'active_op_db') or \
            (obj2.__class__._meta.model_name == 'contenttype' and db_obj1 == 'active_op_db'):
+            return True
+        
+        # Special case: Allow relations between Operation objects and operation-specific models
+        # This ensures that operation-specific models (like Credential) can reference operations from the default database
+        if (obj1.__class__._meta.model_name == 'operation' and db_obj2 == 'active_op_db') or \
+           (obj2.__class__._meta.model_name == 'operation' and db_obj1 == 'active_op_db'):
             return True
             
         if db_obj1 and db_obj2:
